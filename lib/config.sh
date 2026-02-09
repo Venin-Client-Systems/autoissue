@@ -72,6 +72,7 @@ declare -a blocked_issues=()      # Track issues that failed validation
 declare -a blocked_reasons=()     # Track why each issue was blocked
 LAST_ATTEMPTED_TASK=""            # Track last task for blocked issue handling
 session_processed=0               # Track successfully processed tasks this session
+declare -a completed_task_details=()  # "status|agent|issue|task_title|branch|elapsed_secs"
 
 # Loop detection - prevent infinite retries on same issue
 declare -a recent_failed_tasks=() # Rolling window of recently failed task IDs
