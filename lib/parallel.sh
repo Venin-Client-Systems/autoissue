@@ -621,6 +621,7 @@ run_auto_parallel_batch() {
             local comment="## Task Completed by Ralphy (Agent $agent_num)
 
 **Branch:** \`$branch\`
+**Merged into:** \`$BASE_BRANCH\`
 **Engine:** ${AI_ENGINE}
 
 ### Commits
