@@ -118,6 +118,8 @@ get_issue_domain() {
 
 # Check if two domains can safely run in parallel
 # Returns 0 if safe, 1 if not
+# Blocked: unknown (unclassifiable), same domain (file conflicts), database (schema affects all)
+# All other cross-domain pairs are safe — domains touch distinct file areas
 are_domains_compatible() {
   local d1="$1" d2="$2"
 
@@ -130,26 +132,8 @@ are_domains_compatible() {
   # Database changes should never run in parallel with anything
   [[ "$d1" == "database" || "$d2" == "database" ]] && return 1
 
-  case "$d1:$d2" in
-    backend:frontend|frontend:backend) return 0 ;;
-    backend:docs|docs:backend) return 0 ;;
-    frontend:docs|docs:frontend) return 0 ;;
-    backend:tests|tests:backend) return 0 ;;
-    frontend:tests|tests:frontend) return 0 ;;
-    backend:infra|infra:backend) return 0 ;;
-    frontend:infra|infra:frontend) return 0 ;;
-    docs:tests|tests:docs) return 0 ;;
-    docs:infra|infra:docs) return 0 ;;
-    tests:infra|infra:tests) return 0 ;;
-    security:docs|docs:security) return 0 ;;
-    security:tests|tests:security) return 0 ;;
-    security:infra|infra:security) return 0 ;;
-    billing:frontend|frontend:billing) return 0 ;;
-    billing:docs|docs:billing) return 0 ;;
-    billing:tests|tests:billing) return 0 ;;
-    billing:infra|infra:billing) return 0 ;;
-    *) return 1 ;;
-  esac
+  # All other cross-domain pairs are safe to parallelize
+  return 0
 }
 
 # Determine if two issues can safely run in parallel
