@@ -44,6 +44,33 @@ show_summary() {
     # Claude Code is subscription-based, no per-token cost to display
   fi
 
+  # Per-task results
+  if [[ ${#completed_task_details[@]} -gt 0 ]]; then
+    echo ""
+    echo "${BOLD}>>> Task Results${RESET}"
+    for detail in "${completed_task_details[@]}"; do
+      IFS='|' read -r d_status d_agent d_issue d_title d_branch d_elapsed <<< "$detail"
+      local d_elapsed_fmt
+      if [[ "${d_elapsed:-0}" -ge 60 ]] 2>/dev/null; then
+        d_elapsed_fmt="$(( d_elapsed / 60 ))m$(( d_elapsed % 60 ))s"
+      else
+        d_elapsed_fmt="${d_elapsed:-0}s"
+      fi
+      local d_icon d_color
+      case "$d_status" in
+        done)    d_icon="✓"; d_color="$GREEN" ;;
+        blocked) d_icon="⊘"; d_color="$YELLOW" ;;
+        failed)  d_icon="✗"; d_color="$RED" ;;
+        *)       d_icon="?"; d_color="$DIM" ;;
+      esac
+      printf "  ${d_color}%s${RESET} #%-5s %-50s" "$d_icon" "$d_issue" "${d_title:0:50}"
+      if [[ -n "$d_branch" ]]; then
+        printf " → ${CYAN}%s${RESET}" "${d_branch:0:35}"
+      fi
+      printf " ${DIM}(%s)${RESET}\n" "$d_elapsed_fmt"
+    done
+  fi
+
   # Show branches if created
   if [[ -n "${task_branches[*]+"${task_branches[*]}"}" ]]; then
     echo ""

@@ -381,10 +381,10 @@ run_auto_parallel_batch() {
   for ((i=0; i<total_tasks; i++)); do task_started+=(""); done
 
   # Sliding window: fixed-size slot arrays (empty pid = free slot)
-  local -a sw_pids=() sw_tasks=() sw_domains=()
+  local -a sw_pids=() sw_tasks=() sw_domains=() sw_start_times=()
   local -a sw_status_files=() sw_output_files=() sw_log_files=() sw_agent_nums=()
   for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
-    sw_pids+=("") sw_tasks+=("") sw_domains+=("")
+    sw_pids+=("") sw_tasks+=("") sw_domains+=("") sw_start_times+=("$SECONDS")
     sw_status_files+=("") sw_output_files+=("") sw_log_files+=("") sw_agent_nums+=("")
   done
 
@@ -446,9 +446,10 @@ run_auto_parallel_batch() {
 
     ( run_parallel_agent "$task" "$iteration" "$output_file" "$status_file" "$log_file" ) &
     sw_pids[$s]=$!
+    sw_start_times[$s]=$SECONDS
     ((sw_active++))
 
-    printf "  ${CYAN}▶${RESET} Agent %d: %s ${DIM}(%s)${RESET}\n" "$iteration" "${task:0:55}" "$domain"
+    printf "  ${CYAN}▶${RESET} Agent %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$iteration" "$sw_started" "$total_tasks" "${task:0:55}" "$domain"
   done
 
   # --- Sliding window loop ---
@@ -478,8 +479,15 @@ run_auto_parallel_batch() {
       local issue_num="${task%%:*}"
       local agent_num="${sw_agent_nums[$s]}"
       local status=$(cat "${sw_status_files[$s]}" 2>/dev/null || echo "unknown")
+      local agent_elapsed=$(( SECONDS - ${sw_start_times[$s]:-$sw_start_time} ))
+      local agent_elapsed_fmt
+      if [[ $agent_elapsed -ge 60 ]]; then
+        agent_elapsed_fmt="$(( agent_elapsed / 60 ))m$(( agent_elapsed % 60 ))s"
+      else
+        agent_elapsed_fmt="${agent_elapsed}s"
+      fi
 
-      local icon color
+      local icon color detail_line=""
       case "$status" in
         done)
           icon="✓" color="$GREEN"
@@ -498,6 +506,9 @@ run_auto_parallel_batch() {
           [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
           total_input_tokens=$((total_input_tokens + in_tok))
           total_output_tokens=$((total_output_tokens + out_tok))
+          local file_count=$(echo "$files_section" | grep -c '|' 2>/dev/null || echo "0")
+          detail_line=" → ${CYAN}${branch:0:35}${RESET} ${DIM}(${file_count} files, ${agent_elapsed_fmt})${RESET}"
+          completed_task_details+=("done|$agent_num|$issue_num|${task#*:}|${branch:-}|$agent_elapsed")
 
           if [[ "$PRD_SOURCE" == "markdown" ]]; then
             mark_task_complete_markdown "$task"
@@ -544,26 +555,38 @@ ${files_section:-No file changes captured}
           ((sw_failed++))
           local reason="${status#blocked:}"
           mark_issue_blocked "$task" "$reason"
+          detail_line=" ${DIM}— ${reason} (${agent_elapsed_fmt})${RESET}"
+          completed_task_details+=("blocked|$agent_num|$issue_num|${task#*:}||$agent_elapsed")
           ;;
         failed)
           icon="✗" color="$RED"
           ((sw_failed++))
           sw_any_failed=true
           notify_error "Issue #${issue_num} failed: ${task#*:}"
+          detail_line=" ${DIM}(${agent_elapsed_fmt})${RESET}"
+          completed_task_details+=("failed|$agent_num|$issue_num|${task#*:}||$agent_elapsed")
           ;;
         *)
           icon="?" color="$YELLOW"
           ((sw_failed++))
+          detail_line=" ${DIM}(${agent_elapsed_fmt})${RESET}"
+          completed_task_details+=("unknown|$agent_num|$issue_num|${task#*:}||$agent_elapsed")
           ;;
       esac
 
-      # Clear spinner line, print result, then spinner resumes
+      # Clear spinner line, print result with details
       printf "\r%80s\r" ""
-      printf "  ${color}%s${RESET} Agent %d: %s\n" "$icon" "$agent_num" "${task:0:55}"
+      printf "  ${color}%s${RESET} Agent %d: %s%s\n" "$icon" "$agent_num" "${task:0:55}" "$detail_line"
 
       if [[ "$status" == "failed" ]] && [[ -s "${sw_log_files[$s]}" ]]; then
         echo "${DIM}    └─ $(tail -1 "${sw_log_files[$s]}")${RESET}"
       fi
+
+      # Progress tally after each completion
+      local queued_now=$(( total_tasks - sw_started ))
+      [[ $queued_now -lt 0 ]] && queued_now=0
+      printf "    ${DIM}Progress: ${GREEN}%d done${RESET}${DIM} · ${YELLOW}%d blocked${RESET}${DIM} · ${CYAN}%d active${RESET}${DIM} · %d queued · %d total${RESET}\n" \
+        "$sw_done" "$sw_failed" "$sw_active" "$queued_now" "$total_tasks"
 
       release_issue "$issue_num"
       rm -f "${sw_status_files[$s]}" "${sw_output_files[$s]}" "${sw_log_files[$s]}"
@@ -618,9 +641,10 @@ ${files_section:-No file changes captured}
 
         ( run_parallel_agent "$next_task" "$iteration" "$new_of" "$new_sf" "$new_lf" ) &
         sw_pids[$s]=$!
+        sw_start_times[$s]=$SECONDS
         ((sw_active++))
 
-        printf "  ${CYAN}▶${RESET} Agent %d: %s ${DIM}(%s)${RESET}\n" "$iteration" "${next_task:0:55}" "$next_domain"
+        printf "  ${CYAN}▶${RESET} Agent %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$iteration" "$sw_started" "$total_tasks" "${next_task:0:55}" "$next_domain"
       fi
     done
 
@@ -692,8 +716,17 @@ ${files_section:-No file changes captured}
   fi
 
   # Summary line
+  local sw_total_elapsed=$(( SECONDS - sw_start_time ))
+  local sw_elapsed_fmt
+  if [[ $sw_total_elapsed -ge 60 ]]; then
+    sw_elapsed_fmt="$(( sw_total_elapsed / 60 ))m$(( sw_total_elapsed % 60 ))s"
+  else
+    sw_elapsed_fmt="${sw_total_elapsed}s"
+  fi
+
   echo ""
-  echo "${BOLD}Window complete:${RESET} ${GREEN}$sw_done done${RESET} | ${RED}$sw_failed failed${RESET} | $total_tasks total"
+  echo "${BOLD}━━━ Window Complete (${sw_elapsed_fmt}) ━━━${RESET}"
+  echo "  ${GREEN}✓ $sw_done done${RESET}  ·  ${YELLOW}⊘ $sw_failed blocked/failed${RESET}  ·  ${DIM}$total_tasks total${RESET}"
 
   # Check remaining tasks
   local remaining
