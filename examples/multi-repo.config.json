@@ -1,0 +1,39 @@
+{
+  "comment": "Multi-repo support coming soon - this is a proposed format",
+  "projects": [
+    {
+      "name": "backend",
+      "repo": "owner/backend-api",
+      "path": "/workspace/backend-api",
+      "baseBranch": "main",
+      "labels": ["autoissue-backend"]
+    },
+    {
+      "name": "frontend",
+      "repo": "owner/frontend-app",
+      "path": "/workspace/frontend-app",
+      "baseBranch": "develop",
+      "labels": ["autoissue-frontend"]
+    },
+    {
+      "name": "mobile",
+      "repo": "owner/mobile-app",
+      "path": "/workspace/mobile-app",
+      "baseBranch": "main",
+      "labels": ["autoissue-mobile"]
+    }
+  ],
+  "executor": {
+    "maxParallel": 6,
+    "timeoutMinutes": 60,
+    "createPr": true,
+    "prDraft": false
+  },
+  "agent": {
+    "model": "sonnet",
+    "maxBudgetUsd": 10.0,
+    "yolo": true
+  },
+  "maxTotalBudgetUsd": 200.0,
+  "strategy": "round-robin"
+}
