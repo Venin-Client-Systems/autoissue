@@ -157,9 +157,9 @@ graph LR
         F[Security Task] -.waiting.-> C
     end
 
-    style D fill:#f99,stroke:#f00
-    style E fill:#9f9,stroke:#0f0
-    style F fill:#9f9,stroke:#0f0
+    style D fill:#ffcccc,stroke:#cc0000,stroke-width:3px,color:#000
+    style E fill:#ccffcc,stroke:#00cc00,stroke-width:3px,color:#000
+    style F fill:#ccffcc,stroke:#00cc00,stroke-width:3px,color:#000
 ```
 
 **Compatibility Rules:**
@@ -192,9 +192,9 @@ graph TD
     F -->|git push| I[PR #43]
     G -->|git push| J[PR #44]
 
-    style B fill:#e1f5fe
-    style C fill:#e1f5fe
-    style D fill:#e1f5fe
+    style B fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    style C fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    style D fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
 ```
 
 **How It Works:**
