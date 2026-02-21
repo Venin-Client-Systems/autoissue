@@ -57,7 +57,8 @@ const DashboardInner: React.FC<DashboardProps> = ({
     return acc;
   }, {} as Record<string, number>);
 
-  // Cost stats
+  // Cost stats - only show if costs are being tracked (not all zeros)
+  const hasMeaningfulCost = totalCost > 0 || tasks.some(t => (t.costUsd ?? 0) > 0);
   const avgCost = completed.length > 0
     ? completed.reduce((sum, t) => sum + (t.costUsd || 0), 0) / completed.length
     : 0;
@@ -116,12 +117,20 @@ const DashboardInner: React.FC<DashboardProps> = ({
           </Box>
 
           <Box flexDirection="column" width="50%">
-            <Text>
-              <Text bold>Total Cost: </Text>
-              <Text color="cyan">${totalCost.toFixed(2)}</Text>
-            </Text>
-            {avgCost > 0 && (
-              <Text dimColor>Avg: ${avgCost.toFixed(2)}/task</Text>
+            {hasMeaningfulCost ? (
+              <>
+                <Text>
+                  <Text bold>Total Cost: </Text>
+                  <Text color="cyan">${totalCost.toFixed(2)}</Text>
+                </Text>
+                {avgCost > 0 && (
+                  <Text dimColor>Avg: ${avgCost.toFixed(2)}/task</Text>
+                )}
+              </>
+            ) : (
+              <Text dimColor>
+                Cost tracking: N/A
+              </Text>
             )}
           </Box>
         </Box>
@@ -165,7 +174,7 @@ const DashboardInner: React.FC<DashboardProps> = ({
                 )}
                 <Text dimColor>
                   {'  '}⏱ {min}m {sec}s
-                  {task.costUsd && ` | $${task.costUsd.toFixed(2)}`}
+                  {hasMeaningfulCost && task.costUsd && task.costUsd > 0 && ` | $${task.costUsd.toFixed(2)}`}
                   {task.agentSessionId && ` | ${task.agentSessionId.substring(0, 8)}`}
                 </Text>
               </Box>
@@ -220,7 +229,7 @@ const DashboardInner: React.FC<DashboardProps> = ({
           {completed.slice(-3).reverse().map(task => (
             <Text key={task.issueNumber} color="green">
               ✓ #{task.issueNumber} <Text dimColor>[{task.domain}]</Text>
-              {task.costUsd && <Text dimColor> ${task.costUsd.toFixed(2)}</Text>}
+              {hasMeaningfulCost && task.costUsd && task.costUsd > 0 && <Text dimColor> ${task.costUsd.toFixed(2)}</Text>}
               {task.prNumber && <Text color="cyan"> → PR #{task.prNumber}</Text>}
             </Text>
           ))}
