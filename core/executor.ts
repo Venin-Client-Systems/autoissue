@@ -848,7 +848,7 @@ async function executeTask(
 
     // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
-      const prNumber = await createPR(task, worktree.branch, config);
+      const prNumber = await createPR(task, worktree.branch, config, worktree.path);
       task.prNumber = prNumber;
       logger.info('PR created', { issueNumber: task.issueNumber, prNumber });
     }
