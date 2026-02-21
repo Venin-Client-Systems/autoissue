@@ -43,9 +43,12 @@ async function main(): Promise<void> {
     // Parse CLI arguments
     const cliOptions = parseArgs(process.argv);
 
-    // Enable verbose logging if requested
+    // Set log level based on mode
     if (cliOptions.verbose) {
       logger.setLevel('debug');
+    } else if (!cliOptions.headless) {
+      // UI mode: suppress logs, TUI shows status
+      logger.setLevel('error');
     }
 
     // Validate CLI options
