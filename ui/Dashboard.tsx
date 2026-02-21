@@ -11,7 +11,34 @@ interface DashboardProps {
   estimatedCompletion?: string;
 }
 
-export const Dashboard: React.FC<DashboardProps> = ({
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('TUI Error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <Box padding={1}>
+          <Text color="red" bold>TUI Error:</Text>
+          <Text color="red">{this.state.error.message}</Text>
+        </Box>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const DashboardInner: React.FC<DashboardProps> = ({
   tasks,
   totalCost,
   maxBudget,
@@ -22,7 +49,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const failed = tasks.filter(t => t.status === 'failed');
   const pending = tasks.filter(t => t.status === 'pending');
 
-  const costPercent = (totalCost / maxBudget * 100).toFixed(1);
+  const costPercent = maxBudget > 0
+    ? (totalCost / maxBudget * 100).toFixed(1)
+    : '0.0';
   const progressBar = (progress: number = 0) => {
     const filled = Math.floor(progress / 10);
     return '█'.repeat(filled) + '░'.repeat(10 - filled);
@@ -97,3 +126,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
     </Box>
   );
 };
+
+export const Dashboard: React.FC<DashboardProps> = (props) => (
+  <ErrorBoundary>
+    <DashboardInner {...props} />
+  </ErrorBoundary>
+);

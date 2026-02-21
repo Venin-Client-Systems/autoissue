@@ -275,6 +275,9 @@ export interface Task {
   metadata?: {
     depends_on?: number[];
     complexity?: TaskComplexity;
+    linesAdded?: number;
+    linesRemoved?: number;
+    filesChanged?: number;
   };
 }
 

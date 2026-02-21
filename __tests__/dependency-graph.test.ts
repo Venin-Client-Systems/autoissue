@@ -324,4 +324,61 @@ describe('DependencyGraph', () => {
       expect(graph.canStart(999, new Set())).toBe(false);
     });
   });
+
+  describe('visualize', () => {
+    it('should generate ASCII visualization', () => {
+      const graph = new DependencyGraph();
+
+      graph.addTask({ issueNumber: 1 } as Task, []);
+      graph.addTask({ issueNumber: 2 } as Task, [1]);
+      graph.addTask({ issueNumber: 3 } as Task, [1, 2]);
+
+      const output = graph.visualize();
+
+      expect(output).toContain('Dependency Graph');
+      expect(output).toContain('#1');
+      expect(output).toContain('#2');
+      expect(output).toContain('#3');
+      expect(output).toContain('depends on');
+      expect(output).toContain('blocks');
+    });
+
+    it('should handle empty graph', () => {
+      const graph = new DependencyGraph();
+
+      const output = graph.visualize();
+
+      expect(output).toContain('Dependency Graph');
+    });
+  });
+
+  describe('toMermaid', () => {
+    it('should generate Mermaid syntax', () => {
+      const graph = new DependencyGraph();
+
+      graph.addTask({ issueNumber: 1 } as Task, []);
+      graph.addTask({ issueNumber: 2 } as Task, [1]);
+      graph.addTask({ issueNumber: 3 } as Task, [1, 2]);
+
+      const mermaid = graph.toMermaid();
+
+      expect(mermaid).toContain('graph TD');
+      expect(mermaid).toContain('T1[Task #1]');
+      expect(mermaid).toContain('T2[Task #2]');
+      expect(mermaid).toContain('T3[Task #3]');
+      expect(mermaid).toContain('T1 --> T2');
+      expect(mermaid).toContain('T2 --> T3');
+    });
+
+    it('should handle task with no dependencies', () => {
+      const graph = new DependencyGraph();
+
+      graph.addTask({ issueNumber: 1 } as Task, []);
+
+      const mermaid = graph.toMermaid();
+
+      expect(mermaid).toContain('T1[Task #1]');
+      expect(mermaid).not.toContain('-->');
+    });
+  });
 });

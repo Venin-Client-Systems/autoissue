@@ -5,6 +5,7 @@
  * Prevents circular dependencies and ensures tasks execute in the correct sequence.
  */
 
+import { writeFileSync } from 'fs';
 import type { Task } from './types.js';
 
 export interface DependencyNode {
@@ -158,5 +159,62 @@ export class DependencyGraph {
     if (!node) return false;
 
     return node.dependsOn.every((dep) => completedIssues.has(dep));
+  }
+
+  /**
+   * Generate ASCII art visualization of the dependency graph.
+   */
+  visualize(): string {
+    let output = '\n📊 Dependency Graph:\n';
+    output += '─'.repeat(60) + '\n';
+
+    for (const [issueNumber, node] of this.nodes) {
+      const deps =
+        node.dependsOn.length > 0 ? ` ← depends on [${node.dependsOn.join(', ')}]` : '';
+      const blocks = node.blocks.length > 0 ? ` → blocks [${node.blocks.join(', ')}]` : '';
+
+      output += `  #${issueNumber}${deps}${blocks}\n`;
+    }
+
+    output += '─'.repeat(60) + '\n';
+    return output;
+  }
+
+  /**
+   * Generate Mermaid diagram syntax for the dependency graph.
+   */
+  toMermaid(): string {
+    let output = 'graph TD\n';
+
+    for (const [issueNumber, node] of this.nodes) {
+      output += `  T${issueNumber}[Task #${issueNumber}]\n`;
+
+      for (const dep of node.dependsOn) {
+        output += `  T${dep} --> T${issueNumber}\n`;
+      }
+    }
+
+    return output;
+  }
+
+  /**
+   * Save Mermaid diagram to file for visualization.
+   */
+  saveMermaidDiagram(outputPath: string): void {
+    const mermaid = this.toMermaid();
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true });</script>
+</head>
+<body>
+  <div class="mermaid">
+${mermaid}
+  </div>
+</body>
+</html>`;
+
+    writeFileSync(outputPath, html);
   }
 }

@@ -41,6 +41,89 @@ import { analyzeError, enhancePrompt, calculateBackoff, sleep } from '../lib/sma
 import { detectConflicts } from '../lib/conflict-detector.js';
 import { decomposeDirective } from './planner.js';
 import { DependencyGraph } from '../lib/dependency-graph.js';
+import { startDashboardServer, broadcastUpdate } from '../server/dashboard.js';
+import { homedir } from 'os';
+import { join } from 'path';
+
+/**
+ * Resume execution from a previous session.
+ *
+ * Main entry point for resume mode: `autoissue --resume`
+ */
+export async function resumeExecution(
+  session: SessionState,
+  incompleteTasks: Task[],
+  options?: { headless?: boolean; dashboard?: boolean }
+): Promise<SessionState> {
+  logger.info('Resuming execution session', {
+    sessionId: session.sessionId,
+    incompleteTasks: incompleteTasks.length
+  });
+
+  session.status = 'running';
+
+  // Start dashboard server if enabled
+  let stopDashboard: (() => void) | null = null;
+  if (options?.dashboard || session.config.dashboard?.enabled) {
+    stopDashboard = startDashboardServer(session.config.dashboard?.port || 3030);
+  }
+
+  try {
+    // Create scheduler
+    const scheduler = createScheduler(session.config.executor.maxParallel);
+
+    // Enqueue only incomplete tasks
+    enqueueTasks(scheduler, incompleteTasks);
+
+    // Start TUI if not headless
+    const isHeadless = options?.headless ?? true;
+    if (!isHeadless) {
+      startUI(session);
+    }
+
+    // Execute with sliding window
+    await executeSlidingWindow(scheduler, session, session.config, isHeadless, stopDashboard);
+
+    // Mark session complete
+    session.status = 'completed';
+    session.completedAt = new Date().toISOString();
+
+    // Broadcast final state
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
+
+    // Stop TUI
+    if (!isHeadless) {
+      stopUI();
+    }
+
+    const summary = getSummary(scheduler);
+    logger.info('Resume complete', {
+      sessionId: session.sessionId,
+      ...summary,
+      totalCost: session.totalCost,
+    });
+
+    // Print execution summary
+    printExecutionSummary(session);
+
+    return session;
+  } catch (err) {
+    logger.error('Resume failed', {
+      sessionId: session.sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    session.status = 'failed';
+    session.completedAt = new Date().toISOString();
+    throw err;
+  } finally {
+    // Keep dashboard open for 5s to show final state
+    if (stopDashboard) {
+      setTimeout(() => stopDashboard!(), 5000);
+    }
+  }
+}
 
 /**
  * Execute issues with the given label.
@@ -50,7 +133,7 @@ import { DependencyGraph } from '../lib/dependency-graph.js';
 export async function executeIssues(
   label: string,
   config: AutoissueConfig,
-  options?: { headless?: boolean }
+  options?: { headless?: boolean; dashboard?: boolean }
 ): Promise<SessionState> {
   const sessionId = nanoid();
   logger.info('Starting execution session', { sessionId, label });
@@ -65,6 +148,12 @@ export async function executeIssues(
     startedAt: new Date().toISOString(),
     config,
   };
+
+  // Start dashboard server if enabled
+  let stopDashboard: (() => void) | null = null;
+  if (options?.dashboard || config.dashboard?.enabled) {
+    stopDashboard = startDashboardServer(config.dashboard?.port || 3030);
+  }
 
   try {
     // Step 1: Fetch issues from GitHub
@@ -134,11 +223,16 @@ export async function executeIssues(
     }
 
     // Step 4: Execute with sliding window
-    await executeSlidingWindow(scheduler, session, config, isHeadless);
+    await executeSlidingWindow(scheduler, session, config, isHeadless, stopDashboard);
 
     // Mark session complete
     session.status = 'completed';
     session.completedAt = new Date().toISOString();
+
+    // Broadcast final state
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
 
     // Stop TUI
     if (!isHeadless) {
@@ -152,6 +246,9 @@ export async function executeIssues(
       totalCost: session.totalCost,
     });
 
+    // Print execution summary
+    printExecutionSummary(session);
+
     return session;
   } catch (err) {
     logger.error('Execution failed', {
@@ -161,6 +258,11 @@ export async function executeIssues(
     session.status = 'failed';
     session.completedAt = new Date().toISOString();
     throw err;
+  } finally {
+    // Keep dashboard open for 5s to show final state
+    if (stopDashboard) {
+      setTimeout(() => stopDashboard!(), 5000);
+    }
   }
 }
 
@@ -172,7 +274,7 @@ export async function executeIssues(
 export async function executePlannerMode(
   directive: string,
   config: AutoissueConfig,
-  options?: { headless?: boolean; dryRun?: boolean }
+  options?: { headless?: boolean; dryRun?: boolean; dashboard?: boolean }
 ): Promise<SessionState> {
   if (!config.planner?.enabled) {
     throw new Error('Planner mode not enabled in config');
@@ -191,6 +293,12 @@ export async function executePlannerMode(
     startedAt: new Date().toISOString(),
     config,
   };
+
+  // Start dashboard server if enabled
+  let stopDashboard: (() => void) | null = null;
+  if (options?.dashboard || config.dashboard?.enabled) {
+    stopDashboard = startDashboardServer(config.dashboard?.port || 3030);
+  }
 
   try {
     // Step 1: Decompose directive into issues using AI
@@ -327,6 +435,16 @@ export async function executePlannerMode(
 
     session.tasks = tasks;
 
+    // Step 3.5: Display and save dependency graph
+    if (depGraph && tasks.length > 0) {
+      console.log(depGraph.visualize());
+
+      // Save Mermaid diagram
+      const outputPath = join(homedir(), '.autoissue', `dep-graph-${sessionId}.html`);
+      depGraph.saveMermaidDiagram(outputPath);
+      console.log(`📊 Dependency graph saved: ${outputPath}\n`);
+    }
+
     // Step 4: Execute with dependency-aware scheduling
     logger.info('Starting dependency-aware execution', {
       totalTasks: tasks.length,
@@ -343,11 +461,16 @@ export async function executePlannerMode(
     }
 
     // Execute with dependency awareness
-    await executeDependencyAware(scheduler, session, config, depGraph, isHeadless);
+    await executeDependencyAware(scheduler, session, config, depGraph, isHeadless, stopDashboard);
 
     // Mark session complete
     session.status = 'completed';
     session.completedAt = new Date().toISOString();
+
+    // Broadcast final state
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
 
     // Stop TUI
     if (!isHeadless) {
@@ -361,6 +484,9 @@ export async function executePlannerMode(
       totalCost: session.totalCost,
     });
 
+    // Print execution summary
+    printExecutionSummary(session);
+
     return session;
   } catch (err) {
     logger.error('Planner mode execution failed', {
@@ -370,6 +496,11 @@ export async function executePlannerMode(
     session.status = 'failed';
     session.completedAt = new Date().toISOString();
     throw err;
+  } finally {
+    // Keep dashboard open for 5s to show final state
+    if (stopDashboard) {
+      setTimeout(() => stopDashboard!(), 5000);
+    }
   }
 }
 
@@ -381,7 +512,8 @@ async function executeDependencyAware(
   session: SessionState,
   config: AutoissueConfig,
   depGraph: DependencyGraph,
-  isHeadless: boolean
+  isHeadless: boolean,
+  stopDashboard?: (() => void) | null
 ): Promise<void> {
   logger.info('Starting dependency-aware execution');
 
@@ -418,7 +550,7 @@ async function executeDependencyAware(
         emptySlot.startedAt = new Date();
       }
 
-      const promise = executeTask(task, config, scheduler, session, isHeadless)
+      const promise = executeTask(task, config, scheduler, session, isHeadless, stopDashboard)
         .then(() => {
           completedIssues.add(task.issueNumber);
         })
@@ -475,20 +607,16 @@ async function executeDependencyAware(
 async function fetchIssuesByLabel(repo: string, label: string): Promise<GitHubIssue[]> {
   logger.debug('Fetching issues', { repo, label });
 
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-
   try {
-    // Use gh CLI to fetch issues
-    const { stdout } = await execFileAsync('gh', [
+    // Use gh CLI to fetch issues via githubClient (handles rate limits)
+    const stdout = await githubClient.execForStdout([
       'issue', 'list',
       '--repo', repo,
       '--label', label,
       '--state', 'open',
       '--json', 'number,title,body,labels,state,assignees,createdAt,updatedAt,url',
       '--limit', '100'
-    ], { encoding: 'utf-8' });
+    ]);
 
     const rawIssues = JSON.parse(stdout);
 
@@ -529,7 +657,8 @@ async function executeSlidingWindow(
   scheduler: SchedulerState,
   session: SessionState,
   config: AutoissueConfig,
-  isHeadless: boolean
+  isHeadless: boolean,
+  stopDashboard?: (() => void) | null
 ): Promise<void> {
   logger.info('Starting sliding window execution', {
     maxSlots: scheduler.maxSlots,
@@ -541,7 +670,7 @@ async function executeSlidingWindow(
   const scheduleNext = () => {
     const available = fillSlots(scheduler);
     for (const task of available) {
-      const promise = executeTask(task, config, scheduler, session, isHeadless)
+      const promise = executeTask(task, config, scheduler, session, isHeadless, stopDashboard)
         .catch((err) => {
           logger.error('Task execution failed', {
             issueNumber: task.issueNumber,
@@ -586,11 +715,17 @@ async function executeTask(
   config: AutoissueConfig,
   scheduler: SchedulerState,
   session: SessionState,
-  isHeadless: boolean
+  isHeadless: boolean,
+  stopDashboard?: (() => void) | null
 ): Promise<void> {
   const startTime = Date.now();
   task.status = 'running';
   task.startedAt = new Date();
+
+  // Broadcast status update
+  if (stopDashboard) {
+    broadcastUpdate(session);
+  }
 
   logger.info('Task started', { issueNumber: task.issueNumber });
 
@@ -705,7 +840,25 @@ async function executeTask(
       }
     }
 
-    // Step 4: Create PR (if configured)
+    // Step 4: Gather task metrics
+    try {
+      const metrics = await gatherTaskMetrics(worktree.path);
+      task.metadata = {
+        ...task.metadata,
+        linesAdded: metrics.linesAdded,
+        linesRemoved: metrics.linesRemoved,
+        filesChanged: metrics.filesChanged,
+      };
+
+      logger.info('Task metrics', {
+        issueNumber: task.issueNumber,
+        ...metrics
+      });
+    } catch (err) {
+      logger.warn('Failed to gather metrics', { issueNumber: task.issueNumber });
+    }
+
+    // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
       const prNumber = await createPullRequest(task, worktree.branch, config);
       task.prNumber = prNumber;
@@ -716,6 +869,11 @@ async function executeTask(
     task.status = 'completed';
     task.completedAt = new Date();
     completeTask(scheduler, task.issueNumber, true);
+
+    // Broadcast status update
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
 
     // Update UI
     if (!isHeadless) {
@@ -739,6 +897,11 @@ async function executeTask(
     task.error = err instanceof Error ? err.message : String(err);
     task.completedAt = new Date();
     completeTask(scheduler, task.issueNumber, false);
+
+    // Broadcast status update
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
 
     // Update UI
     if (!isHeadless) {
@@ -807,10 +970,6 @@ async function createPullRequest(
 ): Promise<number> {
   logger.debug('Creating PR', { issueNumber: task.issueNumber, branch });
 
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-
   try {
     // Build PR title and body
     const title = `${task.title}`;
@@ -821,7 +980,7 @@ ${task.body}
 ---
 🤖 Generated by Autoissue`;
 
-    // Create PR via gh CLI
+    // Create PR via gh CLI (with rate limit handling)
     const args = [
       'pr', 'create',
       '--repo', config.project.repo,
@@ -835,7 +994,7 @@ ${task.body}
       args.push('--draft');
     }
 
-    const { stdout } = await execFileAsync('gh', args, { encoding: 'utf-8' });
+    const stdout = await githubClient.execForStdout(args);
 
     // Extract PR number from output (gh returns URL)
     const match = stdout.match(/\/pull\/(\d+)/);
@@ -857,5 +1016,112 @@ ${task.body}
     });
     throw new Error(`Failed to create PR: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/**
+ * Gather task metrics (lines changed, files modified).
+ */
+async function gatherTaskMetrics(worktreePath: string): Promise<{
+  linesAdded: number;
+  linesRemoved: number;
+  filesChanged: number;
+}> {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+
+  const { stdout } = await execFileAsync('git', [
+    'diff', '--shortstat', 'HEAD~1', 'HEAD'
+  ], { cwd: worktreePath });
+
+  const match = stdout.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
+
+  return {
+    filesChanged: parseInt(match?.[1] || '0'),
+    linesAdded: parseInt(match?.[2] || '0'),
+    linesRemoved: parseInt(match?.[3] || '0'),
+  };
+}
+
+/**
+ * Print execution summary with PR links and metrics.
+ */
+function printExecutionSummary(session: SessionState): void {
+  const completed = session.tasks.filter(t => t.status === 'completed');
+  const failed = session.tasks.filter(t => t.status === 'failed');
+
+  console.log('\n' + '='.repeat(60));
+  console.log('📊 EXECUTION SUMMARY');
+  console.log('='.repeat(60));
+
+  console.log(`\n✅ Completed: ${completed.length} tasks`);
+  console.log(`❌ Failed: ${failed.length} tasks`);
+  console.log(`💰 Total cost: $${session.totalCost.toFixed(2)}`);
+  console.log(`⏱️  Duration: ${getDuration(session)}`);
+
+  if (completed.length > 0) {
+    console.log('\n✅ Successful PRs:');
+    completed.forEach(t => {
+      const prUrl = `https://github.com/${session.config.project.repo}/pull/${t.prNumber}`;
+      console.log(`  #${t.issueNumber}: ${t.title}`);
+      console.log(`    → PR #${t.prNumber}: ${prUrl}`);
+      console.log(`    💰 Cost: $${(t.costUsd || 0).toFixed(2)}`);
+      if (t.metadata?.linesAdded || t.metadata?.linesRemoved) {
+        console.log(`    📝 Changes: +${t.metadata.linesAdded || 0} -${t.metadata.linesRemoved || 0} lines, ${t.metadata.filesChanged || 0} files`);
+      }
+    });
+  }
+
+  if (failed.length > 0) {
+    console.log('\n❌ Failed Tasks:');
+    failed.forEach(t => {
+      console.log(`  #${t.issueNumber}: ${t.title}`);
+      console.log(`    Error: ${t.error?.slice(0, 100)}`);
+    });
+  }
+
+  // Cost breakdown by domain
+  const costByDomain = new Map<string, number>();
+  for (const task of session.tasks) {
+    const current = costByDomain.get(task.domain) || 0;
+    costByDomain.set(task.domain, current + (task.costUsd || 0));
+  }
+
+  console.log('\n💰 Cost Breakdown by Domain:');
+  for (const [domain, cost] of costByDomain) {
+    const count = session.tasks.filter(t => t.domain === domain).length;
+    console.log(`  ${domain}: $${cost.toFixed(2)} (${count} tasks, avg $${(cost/count).toFixed(2)}/task)`);
+  }
+
+  // Code impact metrics
+  if (completed.length > 0) {
+    const totalLines = completed.reduce((sum, t) =>
+      sum + (t.metadata?.linesAdded || 0) + (t.metadata?.linesRemoved || 0), 0);
+    const totalFiles = completed.reduce((sum, t) =>
+      sum + (t.metadata?.filesChanged || 0), 0);
+
+    if (totalLines > 0) {
+      console.log('\n📈 Code Impact:');
+      console.log(`  Total lines changed: ${totalLines.toLocaleString()}`);
+      console.log(`  Total files modified: ${totalFiles}`);
+      console.log(`  Avg lines/task: ${Math.round(totalLines / completed.length)}`);
+    }
+  }
+
+  console.log('\n' + '='.repeat(60));
+}
+
+/**
+ * Get duration string from session.
+ */
+function getDuration(session: SessionState): string {
+  const start = new Date(session.startedAt).getTime();
+  const end = session.completedAt
+    ? new Date(session.completedAt).getTime()
+    : Date.now();
+  const durationMs = end - start;
+  const minutes = Math.floor(durationMs / 60000);
+  const seconds = Math.floor((durationMs % 60000) / 1000);
+  return `${minutes}m ${seconds}s`;
 }
 
