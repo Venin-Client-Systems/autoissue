@@ -71,21 +71,32 @@ const DashboardInner: React.FC<DashboardProps> = ({
         {running.length > 0 && (
           <>
             <Text bold color="yellow">Active Tasks ({running.length}):</Text>
-            {running.map((task, idx) => (
-              <Box key={task.issueNumber} flexDirection="column" marginY={0}>
-                <Text>
-                  <Text color="green"><Spinner type="dots" /></Text>
-                  {' '}
-                  <Text color="yellow" bold>Slot {idx + 1}:</Text>
-                  {' '}
-                  <Text color="blue">[{task.domain}]</Text>
-                  {' '}
-                  {task.title}
-                  {' '}
-                  <Text color="gray">(#{task.issueNumber})</Text>
-                </Text>
-              </Box>
-            ))}
+            {running.map((task, idx) => {
+              const elapsed = task.startedAt
+                ? Math.floor((Date.now() - new Date(task.startedAt).getTime()) / 1000)
+                : 0;
+              const minutes = Math.floor(elapsed / 60);
+              const seconds = elapsed % 60;
+
+              return (
+                <Box key={task.issueNumber} flexDirection="column" marginY={0} marginLeft={2}>
+                  <Text>
+                    <Text color="green"><Spinner type="dots" /></Text>
+                    {' '}
+                    <Text color="yellow" bold>#{task.issueNumber}</Text>
+                    {' '}
+                    <Text color="blue">[{task.domain}]</Text>
+                    {' '}
+                    {task.title}
+                  </Text>
+                  <Text color="gray" dimColor>
+                    {'  '}Elapsed: {minutes}m {seconds}s
+                    {task.agentSessionId && ` | Session: ${task.agentSessionId.substring(0, 8)}...`}
+                    {task.worktreePath && ` | Worktree: ${task.worktreePath.split('/').pop()}`}
+                  </Text>
+                </Box>
+              );
+            })}
             <Text> </Text>
           </>
         )}
@@ -97,14 +108,21 @@ const DashboardInner: React.FC<DashboardProps> = ({
           </>
         )}
 
-        <Box>
+        <Box flexDirection="column">
           <Text>
             Queue: <Text color="blue">{pending.length}</Text>
+            {' | '}
+            Running: <Text color="yellow">{running.length}</Text>
             {' | '}
             Completed: <Text color="green">{completed.length}</Text>
             {' | '}
             Failed: <Text color="red">{failed.length}</Text>
           </Text>
+          {completed.length > 0 && (
+            <Text color="gray" dimColor>
+              Recent: {completed.slice(-2).map(t => `#${t.issueNumber}`).join(', ')}
+            </Text>
+          )}
         </Box>
 
         <Text>
