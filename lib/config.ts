@@ -9,6 +9,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import type { AutoissueConfig } from './types.js';
 import { AutoissueConfigSchema } from './types.js';
 import { logger } from './logger.js';
@@ -139,7 +140,6 @@ export function generateDefaultConfig(cwd: string = process.cwd()): AutoissueCon
  */
 function getGitRoot(cwd: string): string | null {
   try {
-    const { execSync } = require('node:child_process');
     const root = execSync('git rev-parse --show-toplevel', {
       cwd,
       encoding: 'utf-8',
@@ -161,7 +161,6 @@ function getGitRoot(cwd: string): string | null {
  */
 function getGitRemote(gitRoot: string): string | null {
   try {
-    const { execSync } = require('node:child_process');
     const remote = execSync('git remote get-url origin', {
       cwd: gitRoot,
       encoding: 'utf-8',
