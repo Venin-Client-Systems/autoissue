@@ -11,6 +11,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { logger } from '../lib/logger.js';
 import { WorktreeError } from '../lib/types.js';
 
@@ -91,7 +92,7 @@ export async function createWorktree(
   }
 
   const worktreeName = `${prefix}${branch.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-  const worktreePath = `.worktrees/${worktreeName}`;
+  const worktreePath = resolve(process.cwd(), `.worktrees/${worktreeName}`);
 
   logger.debug('Creating worktree', { branch, worktreePath, baseBranch });
 
