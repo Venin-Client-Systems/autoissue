@@ -220,7 +220,10 @@ export async function spawnAgent(
       validatePrompt(prompt, 'prompt');
       validateModel(opts.model);
       validateBudget(opts.maxBudgetUsd);
-      validatePrompt(opts.systemPrompt, 'systemPrompt');
+      // Only validate system prompt if it's not empty (allows combining into user prompt)
+      if (opts.systemPrompt && opts.systemPrompt.trim()) {
+        validatePrompt(opts.systemPrompt, 'systemPrompt');
+      }
 
       if (opts.timeoutMs !== undefined) {
         validateTimeout(opts.timeoutMs);
@@ -237,8 +240,12 @@ export async function spawnAgent(
         '--output-format', 'json',
         '--model', opts.model,
         '--max-turns', String(maxTurns),
-        '--append-system-prompt', opts.systemPrompt,
       ];
+
+      // Only add system prompt if not empty
+      if (opts.systemPrompt && opts.systemPrompt.trim()) {
+        args.push('--append-system-prompt', opts.systemPrompt);
+      }
 
       if (opts.maxBudgetUsd > 0) {
         args.push('--max-budget-usd', opts.maxBudgetUsd.toString());
@@ -249,6 +256,7 @@ export async function spawnAgent(
       }
 
       logger.debug('Spawning agent', { model: opts.model, maxTurns });
+      logger.info('Claude CLI command', { command: `claude ${args.join(' ')}`, cwd: opts.cwd });
       const stdout = await runClaude(args, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, opts.cwd);
       const output = parseOutput(stdout);
 

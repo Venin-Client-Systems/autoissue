@@ -6,25 +6,19 @@ import type { Task } from '../lib/types.js';
  * This is the main instruction given to the agent about what to implement.
  */
 export function buildTaskPrompt(task: Task): string {
-  return `You are working on a specific task. Focus ONLY on this task:
-
-TASK: #${task.issueNumber} - ${task.title}
+  return `TASK: #${task.issueNumber} - ${task.title}
 
 ${task.body}
 
-Instructions:
-1. Implement this task completely
-2. Write tests if appropriate
-3. Commit your changes with a descriptive message
-4. IMPORTANT: You MUST use tools to read and edit files in this repo
+CRITICAL INSTRUCTIONS:
+1. Start implementing immediately - do NOT spend turns just reading/exploring
+2. Read ONLY the specific files mentioned in the task description
+3. Make the required changes using Edit/Write tools
+4. If the task is genuinely impossible (missing files, conflicting requirements), create ANALYSIS-${task.issueNumber}.md with a brief explanation
 
-SCOPE RULES (MANDATORY):
-- ONLY modify files directly required by this task
-- Do NOT refactor, rename, delete, or 'clean up' code outside the task scope
-- Do NOT remove imports, files, or utilities used by other parts of the codebase
-- Other agents are working on other tasks in parallel. Their work must not be disrupted.
+SCOPE: Only modify files required by this task. Do not refactor unrelated code.
 
-Focus only on implementing: ${task.title}`;
+ACTION REQUIRED: You must produce either code changes OR an analysis file. Completing without changes is not acceptable.`;
 }
 
 /**
@@ -33,17 +27,7 @@ Focus only on implementing: ${task.title}`;
  * This sets the overall context and critical requirements.
  */
 export function buildSystemPrompt(task: Task): string {
-  return `You are a software engineer tasked with implementing issue #${task.issueNumber}.
-
-CRITICAL REQUIREMENTS:
-1. Read the issue body carefully and implement ALL requested changes
-2. Make the necessary code changes to fix/implement the issue
-3. Test your changes to ensure they work
-4. Commit your work with a clear commit message
-5. Push the branch so a PR can be created
-
-You MUST create commits. Do not just analyze - actually implement the solution and commit it.
-Stay focused on the issue scope. Avoid unrelated changes.`;
+  return `You are implementing issue #${task.issueNumber}. You must be action-oriented: read only essential files, then immediately make changes. Avoid extensive exploration - focus on implementation.`;
 }
 
 /**

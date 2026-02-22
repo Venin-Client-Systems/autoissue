@@ -815,6 +815,10 @@ async function executeTask(
   isHeadless: boolean,
   stopDashboard?: (() => void) | null
 ): Promise<void> {
+  // CRITICAL FIX: Capture issueNumber immediately to prevent closure bugs
+  // in concurrent execution where task objects might get swapped
+  const issueNumber = task.issueNumber;
+
   const startTime = Date.now();
   task.status = 'running';
   task.startedAt = new Date();
@@ -825,7 +829,7 @@ async function executeTask(
     broadcastUpdate(session);
   }
 
-  logger.info('Task started', { issueNumber: task.issueNumber });
+  logger.info('Task started', { issueNumber });
 
   let worktreeCleanup: (() => Promise<void>) | null = null;
 
@@ -834,7 +838,7 @@ async function executeTask(
     task.currentAction = 'Creating worktree...';
     if (!isHeadless) updateUI(session);
 
-    const branchName = `autoissue/issue-${task.issueNumber}`;
+    const branchName = `autoissue/issue-${issueNumber}`;
     const { worktree, cleanup } = await createWorktree(branchName, {
       baseBranch: config.project.baseBranch,
       prefix: 'autoissue-',
@@ -845,18 +849,24 @@ async function executeTask(
     task.worktreePath = worktree.path;
 
     logger.info('Worktree created', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       path: worktree.path,
       branch: worktree.branch,
     });
 
-    // Step 2: Build prompt for agent
-    let currentPrompt = buildTaskPrompt(task);
+    // Step 2: Build prompt for agent - combine system + user prompt
+    const systemInstructions = buildSystemPrompt(task);
+    const taskInstructions = buildTaskPrompt(task);
+    let currentPrompt = `${systemInstructions}
+
+---
+
+${taskInstructions}`;
 
     // Step 2.5: Select optimal model based on task complexity
     const selectedModel = selectOptimalModel(task, config.agent);
     logger.info('Model selected', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       model: selectedModel,
       configuredModel: config.agent.model,
     });
@@ -871,14 +881,14 @@ async function executeTask(
         return await spawnAgent(currentPrompt, {
           model: selectedModel,
           maxBudgetUsd: config.agent.maxBudgetUsd,
-          systemPrompt: buildSystemPrompt(task),
+          systemPrompt: '', // Empty - everything is in user prompt now
           cwd: worktree.path,
           yolo: config.agent.yolo,
           maxTurns: config.agent.maxTurns,
           timeoutMs: config.executor.timeoutMinutes * 60 * 1000,
         });
       },
-      `Task #${task.issueNumber} (${selectedModel})`,
+      `Task #${issueNumber} (${selectedModel})`,
       {
         maxRetries: 2,
         observer: FeatureFlags.ENABLE_METRICS ? errorObserver : undefined,
@@ -887,7 +897,7 @@ async function executeTask(
     );
 
     logger.info('Agent completed', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       sessionId: response.sessionId,
       cost: response.costUsd,
       duration: response.durationMs,
@@ -918,7 +928,7 @@ async function executeTask(
         // Commit with descriptive message
         const commitMessage = `fix: ${task.title}
 
-Resolves #${task.issueNumber}
+Resolves #${issueNumber}
 
 ${task.body.split('\n').slice(0, 3).join('\n')}
 
@@ -928,14 +938,17 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
           cwd: worktree.path,
         });
 
-        logger.info('Changes committed', { issueNumber: task.issueNumber });
+        logger.info('Changes committed', { issueNumber });
       } else {
-        logger.warn('No changes to commit', { issueNumber: task.issueNumber });
-        throw new Error('Agent completed but made no changes to commit');
+        logger.error('No changes to commit - agent failed to implement solution or create analysis report', {
+          issueNumber,
+          hint: 'Agent should either make code changes OR create an ANALYSIS-*.md file'
+        });
+        throw new Error('Agent completed but made no changes to commit. Expected code changes or an analysis report file.');
       }
     } catch (err) {
       logger.error('Failed to commit changes', {
-        issueNumber: task.issueNumber,
+        issueNumber,
         error: err instanceof Error ? err.message : String(err),
       });
       throw err;
@@ -955,24 +968,24 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
       };
 
       logger.info('Task metrics', {
-        issueNumber: task.issueNumber,
+        issueNumber,
         ...metrics
       });
     } catch (err) {
-      logger.warn('Failed to gather metrics', { issueNumber: task.issueNumber });
+      logger.warn('Failed to gather metrics', { issueNumber });
     }
 
     // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
       const prNumber = await createPR(task, worktree.branch, config, worktree.path);
       task.prNumber = prNumber;
-      logger.info('PR created', { issueNumber: task.issueNumber, prNumber });
+      logger.info('PR created', { issueNumber, prNumber });
     }
 
     // Mark as completed
     task.status = 'completed';
     task.completedAt = new Date();
-    completeTask(scheduler, task.issueNumber, true);
+    completeTask(scheduler, issueNumber, true);
 
     // Broadcast status update
     if (stopDashboard) {
@@ -988,19 +1001,19 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
     await saveState(session);
 
     logger.info('Task completed successfully', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       duration: Date.now() - startTime,
     });
   } catch (err) {
     logger.error('Task failed', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       error: err instanceof Error ? err.message : String(err),
     });
 
     task.status = 'failed';
     task.error = err instanceof Error ? err.message : String(err);
     task.completedAt = new Date();
-    completeTask(scheduler, task.issueNumber, false);
+    completeTask(scheduler, issueNumber, false);
 
     // Broadcast status update
     if (stopDashboard) {
@@ -1019,10 +1032,10 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
     if (worktreeCleanup) {
       try {
         await worktreeCleanup();
-        logger.debug('Worktree cleaned up', { issueNumber: task.issueNumber });
+        logger.debug('Worktree cleaned up', { issueNumber });
       } catch (err) {
         logger.warn('Worktree cleanup failed', {
-          issueNumber: task.issueNumber,
+          issueNumber,
           error: err instanceof Error ? err.message : String(err),
         });
       }
