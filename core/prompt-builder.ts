@@ -10,13 +10,15 @@ export function buildTaskPrompt(task: Task): string {
 
 ${task.body}
 
-IMPORTANT: You MUST use tools (Read, Edit, Write) to modify files. Do not just plan - actually implement.
+CRITICAL INSTRUCTIONS:
+1. Start implementing immediately - do NOT spend turns just reading/exploring
+2. Read ONLY the specific files mentioned in the task description
+3. Make the required changes using Edit/Write tools
+4. If the task is genuinely impossible (missing files, conflicting requirements), create ANALYSIS-${task.issueNumber}.md with a brief explanation
 
-1. Implement the changes described above
-2. Use Read to examine files, Edit/Write to modify them
-3. If no code changes are possible, create ANALYSIS-${task.issueNumber}.md explaining why
+SCOPE: Only modify files required by this task. Do not refactor unrelated code.
 
-SCOPE: Only modify files required by this task. Do not refactor unrelated code.`;
+ACTION REQUIRED: You must produce either code changes OR an analysis file. Completing without changes is not acceptable.`;
 }
 
 /**
@@ -25,7 +27,7 @@ SCOPE: Only modify files required by this task. Do not refactor unrelated code.`
  * This sets the overall context and critical requirements.
  */
 export function buildSystemPrompt(task: Task): string {
-  return `You are implementing issue #${task.issueNumber}. Use Read/Edit/Write tools to make the required code changes.`;
+  return `You are implementing issue #${task.issueNumber}. You must be action-oriented: read only essential files, then immediately make changes. Avoid extensive exploration - focus on implementation.`;
 }
 
 /**
