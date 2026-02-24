@@ -1011,8 +1011,26 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
       logger.info('Pushed to remote', { issueNumber, targetBranch });
 
       // Close the issue via GitHub API
+      let githubToken = process.env.GITHUB_TOKEN;
+
+      // Fallback to gh CLI token if GITHUB_TOKEN not set
+      if (!githubToken) {
+        try {
+          const { stdout } = await execFileAsync('gh', ['auth', 'token'], { encoding: 'utf-8' });
+          githubToken = stdout.trim();
+        } catch (err) {
+          logger.warn('Could not get token from gh CLI', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      if (!githubToken) {
+        throw new Error('GitHub token not found. Set GITHUB_TOKEN or run `gh auth login`');
+      }
+
       const { Octokit } = await import('@octokit/rest');
-      const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+      const octokit = new Octokit({ auth: githubToken });
       const [owner, repo] = config.project.repo.split('/');
 
       await octokit.issues.update({
