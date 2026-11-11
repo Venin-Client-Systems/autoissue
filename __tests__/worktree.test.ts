@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { resolve } from 'node:path';
 import { WorktreeError } from '../lib/types.js';
 import * as worktree from '../core/worktree.js';
 
@@ -76,12 +77,12 @@ describe('createWorktree', () => {
 
   it('should sanitize branch names for paths', async () => {
     const { worktree: wt } = await worktree.createWorktree('feature/auth-123');
-    expect(wt.path).toBe('.worktrees/autoissue-feature-auth-123');
+    expect(wt.path).toBe(resolve(process.cwd(), '.worktrees/autoissue-feature-auth-123'));
   });
 
   it('should use custom prefix', async () => {
     const { worktree: wt } = await worktree.createWorktree('test', { prefix: 'custom-' });
-    expect(wt.path).toBe('.worktrees/custom-test');
+    expect(wt.path).toBe(resolve(process.cwd(), '.worktrees/custom-test'));
   });
 
   it('should return cleanup function', async () => {

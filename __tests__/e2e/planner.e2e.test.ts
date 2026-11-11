@@ -10,6 +10,23 @@ import { createTestConfig, createMockAgentSpawn } from './setup.js';
 import * as plannerModule from '../../core/planner.js';
 import * as agentModule from '../../core/agent.js';
 
+// Mock for `gh issue create` calls. Hoisted so the vi.mock factory below can reference it.
+const { ghExec } = vi.hoisted(() => ({ ghExec: vi.fn() }));
+
+// The executor calls promisify(execFile), so the mock must honour promisify.custom.
+// `gh` calls are routed to ghExec; other commands (git) use the real implementation.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const { promisify } = await import('node:util');
+  const realExecFileAsync = promisify(actual.execFile);
+
+  const fakeExecFile: any = (...args: any[]) => (actual.execFile as any)(...args);
+  fakeExecFile[promisify.custom] = (file: string, ...rest: any[]) =>
+    file === 'gh' ? ghExec(file, ...rest) : realExecFileAsync(file, ...rest);
+
+  return { ...actual, execFile: fakeExecFile };
+});
+
 describe('Planner E2E', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -44,13 +61,10 @@ describe('Planner E2E', () => {
       vi.spyOn(plannerModule, 'decomposeDirective').mockResolvedValue(mockPlannerResult);
 
       // Mock GitHub issue creation (via gh CLI)
-      const execFileAsync = vi.fn()
+      ghExec.mockReset();
+      ghExec
         .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/101' })
         .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/102' });
-
-      vi.mock('node:child_process', () => ({
-        execFile: (...args: any[]) => execFileAsync(...args),
-      }));
 
       // Mock agent spawn
       const mockAgent = createMockAgentSpawn(0.4);
@@ -165,14 +179,11 @@ describe('Planner E2E', () => {
 
       vi.spyOn(plannerModule, 'decomposeDirective').mockResolvedValue(mockPlannerResult);
 
-      const execFileAsync = vi.fn()
+      ghExec.mockReset();
+      ghExec
         .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/1' })
         .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/2' })
         .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/3' });
-
-      vi.mock('node:child_process', () => ({
-        execFile: (...args: any[]) => execFileAsync(...args),
-      }));
 
       const executionOrder: number[] = [];
       const mockAgent = vi.fn(async (prompt: string) => {

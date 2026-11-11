@@ -73,10 +73,11 @@ describe('Executor E2E', () => {
         createMockIssue(3, '[Database] Success', ['test-label', 'database']),
       ];
 
+      // Task 2 fails on every attempt so the executor's retries cannot mask the failure
       let callCount = 0;
-      const mockAgent = vi.fn(async () => {
+      const mockAgent = vi.fn(async (prompt: string) => {
         callCount++;
-        if (callCount === 2) {
+        if (prompt.includes('TASK: #2 ')) {
           throw new Error('Mock failure for task 2');
         }
         return {
@@ -101,7 +102,8 @@ describe('Executor E2E', () => {
       expect(session.tasks[1].error).toContain('Mock failure');
     });
 
-    it('should enforce budget limits', async () => {
+    it('should not block execution when cost exceeds budget (budget is informational only)', async () => {
+      // Budget enforcement was removed deliberately (see commit e5533b8)
       const mockIssues = [
         createMockIssue(1, '[Backend] Task 1', ['test-label', 'backend']),
         createMockIssue(2, '[Frontend] Task 2', ['test-label', 'frontend']),
@@ -113,14 +115,16 @@ describe('Executor E2E', () => {
       vi.spyOn(agentModule, 'spawnAgent').mockImplementation(mockAgent);
 
       const config = createTestConfig({
-        maxTotalBudgetUsd: 3.0, // Only enough for 1-2 tasks
+        maxTotalBudgetUsd: 3.0, // Lower than the total spend below
         agent: { model: 'haiku', maxBudgetUsd: 2.0, yolo: true },
       });
 
-      // Should throw because estimated cost exceeds budget
-      await expect(
-        executeIssues('test-label', config, { headless: true })
-      ).rejects.toThrow(/Cannot afford/);
+      const session = await executeIssues('test-label', config, { headless: true });
+
+      expect(session.status).toBe('completed');
+      expect(session.tasks.filter(t => t.status === 'completed')).toHaveLength(3);
+      expect(mockAgent).toHaveBeenCalledTimes(3);
+      expect(session.totalCost).toBeCloseTo(6.0);
     });
 
     it('should handle empty issue list', async () => {
@@ -139,7 +143,7 @@ describe('Executor E2E', () => {
         createMockIssue(1, '[Backend] API fix', ['test-label', 'backend']),
         createMockIssue(2, '[Frontend] UI update', ['test-label', 'frontend']),
         createMockIssue(3, '[Database] Migration', ['test-label', 'database']),
-        createMockIssue(4, 'Unknown task', ['test-label']), // No domain label
+        createMockIssue(4, 'Unknown task', []), // No domain label (only the filter label 'test-label' is absent here)
       ];
       const mockAgent = createMockAgentSpawn(0.3);
 
@@ -161,13 +165,12 @@ describe('Executor E2E', () => {
         createMockIssue(2, '[Frontend] Task 2', ['test-label', 'frontend']),
       ];
 
-      let callCount = 0;
-      const mockAgent = vi.fn(async () => {
-        callCount++;
+      // Tasks run in parallel, so key the cost on the task rather than on call order
+      const mockAgent = vi.fn(async (prompt: string) => {
         return {
-          sessionId: `mock-session-${callCount}`,
+          sessionId: `mock-session-${Date.now()}`,
           content: 'Success',
-          costUsd: callCount === 1 ? 0.25 : 0.75, // Different costs
+          costUsd: prompt.includes('TASK: #1 ') ? 0.25 : 0.75, // Different costs
           durationMs: 1000,
         };
       });
