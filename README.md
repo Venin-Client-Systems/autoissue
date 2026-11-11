@@ -21,6 +21,12 @@ Autoissue is a parallel AI code execution engine that transforms GitHub issues i
 - **🔐 Secure** - Optional authentication for dashboard (Basic Auth + Token)
 - **📝 Structured Logging** - JSON logs with daily rotation for production
 
+## Requirements
+
+- Node.js 20 or newer
+- GitHub CLI (`gh`) authenticated, or a `GITHUB_TOKEN`
+- At least one agent CLI: Codex (`codex`, logged in with ChatGPT) and/or Claude Code (`claude`)
+
 ## 🚀 Quick Start
 
 ### Installation
