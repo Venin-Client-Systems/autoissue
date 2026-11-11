@@ -59,7 +59,12 @@ describe('loadConfig', () => {
 
     const config = loadConfig('/path/to/config.json');
 
-    expect(config).toEqual(mockConfig);
+    expect(config).toMatchObject(mockConfig);
+    // New fields get defaults: Codex first, Claude fallback, auto difficulty
+    expect(config.agent.engines).toEqual(['codex', 'claude']);
+    expect(config.agent.tier).toBe('auto');
+    expect(config.agent.claudeModels).toEqual({ simple: 'haiku', medium: 'sonnet', complex: 'opus' });
+    expect(config.executor.skipIssuesWithOpenPr).toBe(true);
   });
 
   it('should throw on missing file', () => {

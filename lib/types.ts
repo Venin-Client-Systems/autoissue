@@ -111,6 +111,11 @@ export const ProjectConfigSchema = z.object({
   repo: z.string().regex(/^[^/]+\/[^/]+$/, 'Must be owner/repo format'),
   path: z.string(),
   baseBranch: z.string().default('main'),
+  /**
+   * PR mode only: target the branch currently checked out in project.path instead of baseBranch.
+   * Merge mode (createPr=false) always merges into the current branch.
+   */
+  useCurrentBranch: z.boolean().default(false),
 });
 
 /**
@@ -121,6 +126,22 @@ export const ExecutorConfigSchema = z.object({
   timeoutMinutes: z.number().int().min(5).max(120).default(30),
   createPr: z.boolean().default(true),
   prDraft: z.boolean().default(false),
+  /** Shell command run in the worktree after the agent finishes (e.g. "cargo test"). Failure gets one fix-up attempt, then the task fails. */
+  verifyCommand: z.string().min(1).optional(),
+  verifyTimeoutMinutes: z.number().int().min(1).max(120).default(20),
+  /** Skip issues that already have an open PR (autoissue branch or "Closes #n"). */
+  skipIssuesWithOpenPr: z.boolean().default(true),
+  /**
+   * Task branch name. Placeholders: {issue} (GitHub number), {slug} (title slug),
+   * {key} (title key like "[BST-012]" → "bst-012"; falls back to "issue-{issue}").
+   * Example for Bastion: "{key}-{slug}" → "bst-012-add-audit-export".
+   */
+  branchTemplate: z.string().min(1).default('autoissue/issue-{issue}'),
+  /**
+   * Run verifyCommand on the untouched base first (cached per base commit). If the base already
+   * fails, a failing verification is reported on the PR instead of failing the task.
+   */
+  verifyBaseline: z.boolean().default(true),
 });
 
 /**
@@ -136,10 +157,39 @@ export const PlannerConfigSchema = z.object({
 /**
  * Agent configuration - settings for worker agents.
  */
+export const EngineNameSchema = z.enum(['codex', 'claude']);
+export const DifficultySchema = z.enum(['simple', 'medium', 'complex']);
+
+export const CodexModelChoiceSchema = z.object({
+  model: z.string().min(1),
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional(),
+});
+
+export const CodexModelsSchema = z.object({
+  simple: CodexModelChoiceSchema.default({ model: 'gpt-6-luna', effort: 'medium' }),
+  medium: CodexModelChoiceSchema.default({ model: 'gpt-6.1-sol', effort: 'medium' }),
+  complex: CodexModelChoiceSchema.default({ model: 'gpt-6-astra', effort: 'high' }),
+});
+
+export const ClaudeModelsSchema = z.object({
+  simple: z.enum(['opus', 'sonnet', 'haiku']).default('haiku'),
+  medium: z.enum(['opus', 'sonnet', 'haiku']).default('sonnet'),
+  complex: z.enum(['opus', 'sonnet', 'haiku']).default('opus'),
+});
+
 export const AgentConfigSchema = z.object({
+  /** Engines tried in order. A usage limit (or missing CLI) on one falls through to the next. */
+  engines: z.array(EngineNameSchema).min(1).default(['codex', 'claude']),
+  /** 'auto' picks simple/medium/complex per issue (labels first, then heuristic). */
+  tier: z.enum(['auto', 'simple', 'medium', 'complex']).default('auto'),
+  codexModels: CodexModelsSchema.default({}),
+  claudeModels: ClaudeModelsSchema.default({}),
+  /** Deprecated: use tier/claudeModels. 'opus' or 'haiku' here force complex/simple when tier is 'auto'. */
   model: z.enum(['opus', 'sonnet', 'haiku']).default('sonnet'),
+  /** Per-task Claude budget cap (USD). Codex runs on the ChatGPT plan and reports no cost. */
   maxBudgetUsd: z.number().min(0.01).default(5.0),
   yolo: z.boolean().default(true),
+  /** Claude max turns per task. Default 150 (budget and timeout are the real caps). */
   maxTurns: z.number().int().positive().optional(),
 });
 
@@ -324,6 +374,11 @@ export interface Task {
     linesAdded?: number;
     linesRemoved?: number;
     filesChanged?: number;
+    engine?: 'codex' | 'claude';
+    model?: string;
+    difficulty?: 'simple' | 'medium' | 'complex';
+    difficultyReason?: string;
+    verification?: 'passed' | 'failed-baseline-red' | 'skipped';
   };
 }
 

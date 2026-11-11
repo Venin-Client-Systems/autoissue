@@ -9,10 +9,55 @@ import { executePlannerMode } from '../../core/executor.js';
 import { createTestConfig, createMockAgentSpawn } from './setup.js';
 import * as plannerModule from '../../core/planner.js';
 import * as agentModule from '../../core/agent.js';
+import * as githubApiModule from '../../lib/github-api.js';
+import * as stateModule from '../../core/state.js';
+import { DependencyGraph } from '../../lib/dependency-graph.js';
+
+const childProcessMock = vi.hoisted(() => {
+  const issueUrls: string[] = [];
+  const execFile = vi.fn((file: string, args: string[], opts: unknown, callback?: Function) => {
+    if (typeof opts === 'function') {
+      callback = opts;
+    }
+
+    if (file === 'gh' && args[0] === 'issue' && args[1] === 'create') {
+      const stdout = issueUrls.shift() ?? 'https://github.com/test/repo/issues/999';
+      callback?.(null, { stdout, stderr: '' });
+      return;
+    }
+
+    const stdoutForGit = (): string => {
+      if (args[0] === 'branch' && args[1] === '--show-current') return 'autoissue-test\n';
+      if (args[0] === '-C' && args.includes('rev-parse') && args.includes('HEAD')) return 'abc123\n';
+      if (args[0] === 'log' && args[1] === '--oneline') return 'abc123 Initial commit\n';
+      if (args[0] === 'status' && args[1] === '--porcelain') return ' M mock-change.txt\n';
+      if (args[0] === 'diff' && args[1] === '--shortstat') return ' 1 file changed, 1 insertion(+)\n';
+      if (args[0] === 'worktree' && args[1] === 'list') return '';
+      if (args[0] === 'rev-list' && args[1] === '--count') return '1\n';
+      if (args[0] === 'diff' && args[1] === '--name-only') return 'mock-change.txt\n';
+      return '';
+    };
+
+    callback?.(null, { stdout: file === 'git' ? stdoutForGit() : '', stderr: '' });
+  });
+
+  return { execFile, issueUrls };
+});
+
+vi.mock('node:child_process', () => ({
+  execFile: childProcessMock.execFile,
+  spawn: vi.fn(() => { throw new Error('spawn is not available in e2e tests'); }),
+}));
 
 describe('Planner E2E', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    childProcessMock.issueUrls.length = 0;
+    vi.spyOn(githubApiModule.githubApi, 'createPullRequest').mockResolvedValue(123);
+    vi.spyOn(githubApiModule.githubApi, 'closeIssue').mockResolvedValue(undefined);
+    vi.spyOn(githubApiModule.githubApi, 'listIssuesWithOpenPullRequests').mockResolvedValue(new Set());
+    vi.spyOn(stateModule, 'saveState').mockImplementation(() => undefined);
+    vi.spyOn(DependencyGraph.prototype, 'saveMermaidDiagram').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -43,18 +88,15 @@ describe('Planner E2E', () => {
       // Mock planner decomposition
       vi.spyOn(plannerModule, 'decomposeDirective').mockResolvedValue(mockPlannerResult);
 
-      // Mock GitHub issue creation (via gh CLI)
-      const execFileAsync = vi.fn()
-        .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/101' })
-        .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/102' });
-
-      vi.mock('node:child_process', () => ({
-        execFile: (...args: any[]) => execFileAsync(...args),
-      }));
+      childProcessMock.issueUrls.push(
+        'https://github.com/test/repo/issues/101',
+        'https://github.com/test/repo/issues/102',
+      );
 
       // Mock agent spawn
       const mockAgent = createMockAgentSpawn(0.4);
       vi.spyOn(agentModule, 'spawnAgent').mockImplementation(mockAgent);
+      vi.spyOn(agentModule, 'runClaudeOnce').mockImplementation(mockAgent);
 
       const config = createTestConfig({
         planner: {
@@ -165,14 +207,11 @@ describe('Planner E2E', () => {
 
       vi.spyOn(plannerModule, 'decomposeDirective').mockResolvedValue(mockPlannerResult);
 
-      const execFileAsync = vi.fn()
-        .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/1' })
-        .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/2' })
-        .mockResolvedValueOnce({ stdout: 'https://github.com/test/repo/issues/3' });
-
-      vi.mock('node:child_process', () => ({
-        execFile: (...args: any[]) => execFileAsync(...args),
-      }));
+      childProcessMock.issueUrls.push(
+        'https://github.com/test/repo/issues/1',
+        'https://github.com/test/repo/issues/2',
+        'https://github.com/test/repo/issues/3',
+      );
 
       const executionOrder: number[] = [];
       const mockAgent = vi.fn(async (prompt: string) => {
@@ -190,6 +229,7 @@ describe('Planner E2E', () => {
       });
 
       vi.spyOn(agentModule, 'spawnAgent').mockImplementation(mockAgent);
+      vi.spyOn(agentModule, 'runClaudeOnce').mockImplementation(mockAgent);
 
       const config = createTestConfig({
         planner: { enabled: true, model: 'sonnet', maxBudgetUsd: 2.0 },

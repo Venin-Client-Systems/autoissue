@@ -6,12 +6,13 @@
 
 import { vi } from 'vitest';
 import type { AutoissueConfig } from '../../lib/types.js';
+import { AutoissueConfigSchema } from '../../lib/types.js';
 
 /**
  * Create a test configuration for E2E tests.
  */
 export function createTestConfig(overrides?: Partial<AutoissueConfig>): AutoissueConfig {
-  return {
+  const raw: any = {
     project: {
       repo: 'test-org/test-repo',
       path: process.cwd(),
@@ -36,6 +37,9 @@ export function createTestConfig(overrides?: Partial<AutoissueConfig>): Autoissu
     },
     ...overrides,
   };
+  // E2E runs only the (mocked) Claude engine; Codex fallback is covered in engines.test.ts
+  raw.agent = { engines: ['claude'], ...raw.agent };
+  return AutoissueConfigSchema.parse(raw);
 }
 
 /**
