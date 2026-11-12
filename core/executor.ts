@@ -34,21 +34,43 @@ import {
   type SchedulerState,
 } from './scheduler.js';
 import { createWorktree, cleanupWorktree } from './worktree.js';
-import { spawnAgent } from './agent.js';
+import { runTaskAgent, getExhaustedEngines, resetEngineState, resetWorktree } from './engines.js';
+import { AllEnginesExhaustedError } from './usage-limit.js';
 import { saveState } from './state.js';
 import { startUI, updateUI, stopUI } from '../ui/cli-ui.js';
-import { selectOptimalModel } from '../lib/model-selector.js';
+import { assessDifficulty, type Difficulty } from '../lib/difficulty.js';
 import { withErrorBoundary, CircuitBreaker, ErrorBoundaryObserver } from './error-boundaries.js';
 import { FeatureFlags } from '../lib/feature-flags.js';
 import { detectConflicts } from '../lib/conflict-detector.js';
 import { BudgetTracker } from './budget-tracker.js';
-import { buildTaskPrompt, buildSystemPrompt } from './prompt-builder.js';
+import { buildTaskPrompt, buildSystemPrompt, buildFixPrompt } from './prompt-builder.js';
 import { createPullRequest as createPR, gatherTaskMetrics } from './pr-manager.js';
 import { decomposeDirective } from './planner.js';
 import { DependencyGraph } from '../lib/dependency-graph.js';
 import { startDashboardServer, broadcastUpdate } from '../server/dashboard.js';
 import { homedir } from 'os';
 import { join } from 'path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const PROTECTED_DIRECT_PUSH_BRANCHES = new Set(['main', 'master', 'develop']);
+let mergeWorkflowQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Set when every agent engine is out of usage. Running tasks finish, no new
+ * tasks start, and unstarted tasks stay 'pending' for `autoissue resume`.
+ */
+let haltReason: string | null = null;
+
+export function getHaltReason(): string | null {
+  return haltReason;
+}
+
+function beginRun(): void {
+  haltReason = null;
+  resetEngineState();
+}
 
 /**
  * Shared circuit breaker for agent operations.
@@ -75,20 +97,21 @@ export async function resumeExecution(
     sessionId: session.sessionId,
     incompleteTasks: incompleteTasks.length
   });
+  beginRun();
+  for (const task of incompleteTasks) {
+    task.status = 'pending';
+    task.error = undefined;
+  }
 
-  // Detect current branch and use it as base (for feature branch workflow)
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-
+  let currentBranch: string | null = null;
   try {
-    const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
-      cwd: session.config.project.path,
-    });
-    const currentBranch = stdout.trim();
+    currentBranch = await getCurrentBranch(session.config.project.path);
 
-    if (currentBranch && currentBranch !== session.config.project.baseBranch) {
-      logger.info('Using current branch as base for PRs', {
+    // Merge mode merges into the checked-out branch; PR mode targets project.baseBranch
+    // unless project.useCurrentBranch is set (a stray feature-branch checkout must not retarget PRs)
+    const followCurrent = !session.config.executor.createPr || session.config.project.useCurrentBranch;
+    if (followCurrent && currentBranch && currentBranch !== session.config.project.baseBranch) {
+      logger.info('Using current branch as base', {
         currentBranch,
         configuredBase: session.config.project.baseBranch,
       });
@@ -98,6 +121,9 @@ export async function resumeExecution(
     logger.warn('Failed to detect current branch, using configured base', {
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+  if (currentBranch && !session.config.executor.createPr) {
+    assertMergeTargetAllowed(currentBranch);
   }
 
   // Initialize budget tracker with remaining budget
@@ -139,9 +165,8 @@ export async function resumeExecution(
     // Execute with sliding window
     await executeSlidingWindow(scheduler, session, session.config, budgetTracker, isHeadless, stopDashboard);
 
-    // Mark session complete
-    session.status = 'completed';
-    session.completedAt = new Date().toISOString();
+    // Mark session complete (or paused when engines ran out of usage)
+    finishSession(session);
 
     // Broadcast final state
     if (stopDashboard) {
@@ -192,20 +217,17 @@ export async function executeIssues(
 ): Promise<SessionState> {
   const sessionId = nanoid();
   logger.info('Starting execution session', { sessionId, label });
+  beginRun();
 
-  // Detect current branch and use it as base (for feature branch workflow)
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-
+  let currentBranch: string | null = null;
   try {
-    const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
-      cwd: config.project.path,
-    });
-    const currentBranch = stdout.trim();
+    currentBranch = await getCurrentBranch(config.project.path);
 
-    if (currentBranch && currentBranch !== config.project.baseBranch) {
-      logger.info('Using current branch as base for PRs', {
+    // Merge mode merges into the checked-out branch; PR mode targets project.baseBranch
+    // unless project.useCurrentBranch is set (a stray feature-branch checkout must not retarget PRs)
+    const followCurrent = !config.executor.createPr || config.project.useCurrentBranch;
+    if (followCurrent && currentBranch && currentBranch !== config.project.baseBranch) {
+      logger.info('Using current branch as base', {
         currentBranch,
         configuredBase: config.project.baseBranch,
       });
@@ -215,6 +237,9 @@ export async function executeIssues(
     logger.warn('Failed to detect current branch, using configured base', {
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+  if (currentBranch && !config.executor.createPr) {
+    assertMergeTargetAllowed(currentBranch);
   }
 
   // Initialize budget tracker
@@ -243,9 +268,25 @@ export async function executeIssues(
   }
 
   try {
-    // Step 1: Fetch issues from GitHub
-    const issues = await fetchIssuesByLabel(config.project.repo, label);
+    // Step 1: Fetch issues from GitHub (oldest first), skipping ones that already have an open PR
+    let issues = await fetchIssuesByLabel(config.project.repo, label);
     logger.info('Fetched issues', { count: issues.length, label });
+
+    if (config.executor.skipIssuesWithOpenPr && issues.length > 0) {
+      try {
+        const covered = await githubApi.listIssuesWithOpenPullRequests(config.project.repo);
+        const skipped = issues.filter((i) => covered.has(i.number)).map((i) => i.number);
+        if (skipped.length > 0) {
+          logger.info('Skipping issues that already have an open PR', { skipped });
+          console.log(`⏭️  Skipping issues with an open PR: ${skipped.map((n) => `#${n}`).join(', ')}`);
+          issues = issues.filter((i) => !covered.has(i.number));
+        }
+      } catch (err) {
+        logger.warn('Could not check open PRs; processing all issues', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     if (issues.length === 0) {
       logger.warn('No issues found', { label });
@@ -285,11 +326,14 @@ export async function executeIssues(
       })),
     });
 
-    // Budget tracking is optional - no enforcement
+    // Each task is checked against the remaining budget before it starts; here we only
+    // confirm at least one task fits (Codex tasks report $0, so a total estimate is meaningless).
+    budgetTracker.canAfford(config.agent.maxBudgetUsd);
+
     const state = budgetTracker.getState();
-    logger.debug('Budget state (informational only)', {
+    logger.debug('Budget state', {
       tasks: tasks.length,
-      estimatedCost: `$${(budgetTracker.estimateNextTaskCost() * tasks.length).toFixed(2)}`,
+      perTaskCap: `$${config.agent.maxBudgetUsd.toFixed(2)}`,
       budget: `$${config.maxTotalBudgetUsd.toFixed(2)}`,
       remaining: `$${state.remainingUsd.toFixed(2)}`,
     });
@@ -307,9 +351,8 @@ export async function executeIssues(
     // Step 4: Execute with sliding window
     await executeSlidingWindow(scheduler, session, config, budgetTracker, isHeadless, stopDashboard);
 
-    // Mark session complete
-    session.status = 'completed';
-    session.completedAt = new Date().toISOString();
+    // Mark session complete (or paused when engines ran out of usage)
+    finishSession(session);
 
     // Broadcast final state
     if (stopDashboard) {
@@ -364,20 +407,17 @@ export async function executePlannerMode(
 
   const sessionId = nanoid();
   logger.info('Starting planner mode', { sessionId, directive });
+  beginRun();
 
-  // Detect current branch and use it as base (for feature branch workflow)
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-
+  let currentBranch: string | null = null;
   try {
-    const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
-      cwd: config.project.path,
-    });
-    const currentBranch = stdout.trim();
+    currentBranch = await getCurrentBranch(config.project.path);
 
-    if (currentBranch && currentBranch !== config.project.baseBranch) {
-      logger.info('Using current branch as base for PRs', {
+    // Merge mode merges into the checked-out branch; PR mode targets project.baseBranch
+    // unless project.useCurrentBranch is set (a stray feature-branch checkout must not retarget PRs)
+    const followCurrent = !config.executor.createPr || config.project.useCurrentBranch;
+    if (followCurrent && currentBranch && currentBranch !== config.project.baseBranch) {
+      logger.info('Using current branch as base', {
         currentBranch,
         configuredBase: config.project.baseBranch,
       });
@@ -387,6 +427,9 @@ export async function executePlannerMode(
     logger.warn('Failed to detect current branch, using configured base', {
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+  if (currentBranch && !config.executor.createPr) {
+    assertMergeTargetAllowed(currentBranch);
   }
 
   // Initialize budget tracker
@@ -448,10 +491,6 @@ export async function executePlannerMode(
 
     // Step 2: Create GitHub issues
     logger.info('Creating GitHub issues', { count: plannerResult.issues.length });
-
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
 
     const createdIssues: number[] = [];
     const issueIndexToNumber = new Map<number, number>(); // Map array index to actual issue number
@@ -577,9 +616,8 @@ export async function executePlannerMode(
     // Execute with dependency awareness
     await executeDependencyAware(scheduler, session, config, depGraph, budgetTracker, isHeadless, stopDashboard);
 
-    // Mark session complete
-    session.status = 'completed';
-    session.completedAt = new Date().toISOString();
+    // Mark session complete (or paused when engines ran out of usage)
+    finishSession(session);
 
     // Broadcast final state
     if (stopDashboard) {
@@ -636,6 +674,7 @@ async function executeDependencyAware(
   const completedIssues = new Set<number>();
 
   const scheduleNext = () => {
+    if (haltReason) return;
     // Get ready tasks (all dependencies met)
     const readyIssues = depGraph.getReadyTasks(completedIssues);
 
@@ -667,7 +706,10 @@ async function executeDependencyAware(
 
       const promise = executeTask(task, config, scheduler, session, budgetTracker, isHeadless, stopDashboard)
         .then(() => {
-          completedIssues.add(task.issueNumber);
+          // executeTask records failures on the task instead of throwing
+          if (task.status === 'completed') {
+            completedIssues.add(task.issueNumber);
+          }
         })
         .catch((err) => {
           logger.error('Task execution failed', {
@@ -699,15 +741,16 @@ async function executeDependencyAware(
     if (runningTasks.size > 0) {
       await Promise.race([...runningTasks.values(), new Promise((resolve) => setTimeout(resolve, 100))]);
     } else {
-      // Check if we're stuck (tasks pending but none ready)
+      // Nothing running: either done, halted, or the rest is blocked by failed dependencies
       const pendingTasks = session.tasks.filter((t) => t.status === 'pending');
-      if (pendingTasks.length > 0) {
-        const blockedTasks = depGraph.getBlockedTasks();
-        logger.error('Execution stuck - tasks pending but blocked', {
+      if (pendingTasks.length > 0 && !haltReason) {
+        logger.warn('Remaining tasks are blocked by failed or unfinished dependencies', {
           pending: pendingTasks.map((t) => t.issueNumber),
-          blocked: Array.from(blockedTasks.entries()),
+          blocked: Array.from(depGraph.getBlockedTasks().entries()),
         });
-        throw new Error('Execution stuck: tasks are blocked by incomplete dependencies');
+        for (const task of pendingTasks) {
+          task.error = 'Not started: a dependency did not complete';
+        }
       }
       break;
     }
@@ -764,6 +807,7 @@ async function executeSlidingWindow(
   const runningTasks = new Map<number, Promise<void>>();
 
   const scheduleNext = () => {
+    if (haltReason) return;
     const available = fillSlots(scheduler);
     for (const task of available) {
       const promise = executeTask(task, config, scheduler, session, budgetTracker, isHeadless, stopDashboard)
@@ -786,7 +830,7 @@ async function executeSlidingWindow(
   scheduleNext();
 
   // Wait for all tasks to complete
-  while (runningTasks.size > 0 || hasWork(scheduler)) {
+  while (runningTasks.size > 0 || (!haltReason && hasWork(scheduler))) {
     if (runningTasks.size > 0) {
       await Promise.race([
         ...runningTasks.values(),
@@ -798,7 +842,11 @@ async function executeSlidingWindow(
     }
   }
 
-  logger.info('Sliding window complete');
+  if (haltReason) {
+    // Unstarted tasks stay pending so `autoissue resume` picks them up
+    for (const task of scheduler.queue) task.status = 'pending';
+  }
+  logger.info('Sliding window complete', { halted: Boolean(haltReason) });
 }
 
 /**
@@ -838,131 +886,118 @@ async function executeTask(
     task.currentAction = 'Creating worktree...';
     if (!isHeadless) updateUI(session);
 
-    const branchName = `autoissue/issue-${issueNumber}`;
+    const branchName = buildBranchName(config.executor.branchTemplate, task);
     const { worktree, cleanup } = await createWorktree(branchName, {
       baseBranch: config.project.baseBranch,
       prefix: 'autoissue-',
       force: true,
+      fetch: true,
+      repoPath: config.project.path,
     });
 
     worktreeCleanup = cleanup;
     task.worktreePath = worktree.path;
+    const baseCommit = worktree.commit;
 
     logger.info('Worktree created', {
       issueNumber,
       path: worktree.path,
       branch: worktree.branch,
+      baseCommit: baseCommit.slice(0, 8),
     });
 
-    // Step 2: Build prompt for agent
-    let currentPrompt = buildTaskPrompt(task);
+    // Step 2: Decide difficulty → model tier
+    const difficulty = assessDifficulty(task, resolveForcedTier(config));
+    task.metadata = { ...task.metadata, difficulty: difficulty.tier, difficultyReason: difficulty.reason };
+    logger.info('Difficulty assessed', { issueNumber, tier: difficulty.tier, source: difficulty.source, reason: difficulty.reason });
 
-    // Step 2.5: Select optimal model based on task complexity
-    const selectedModel = selectOptimalModel(task, config.agent);
-    logger.info('Model selected', {
-      issueNumber,
-      model: selectedModel,
-      configuredModel: config.agent.model,
-    });
-
-    // Step 3: Spawn agent in worktree with error boundary
-    task.currentAction = `Running ${selectedModel} agent...`;
-    if (!isHeadless) updateUI(session);
-
-    // Execute with error boundary and circuit breaker
-    const response = await withErrorBoundary(
-      async () => {
-        return await spawnAgent(currentPrompt, {
-          model: selectedModel,
-          maxBudgetUsd: config.agent.maxBudgetUsd,
+    // Step 3: Run the agent (Codex first, Claude on usage limit) with one retry for transient failures
+    const timeoutMs = config.executor.timeoutMinutes * 60 * 1000;
+    const runAgent = async (prompt: string, resetFirst: boolean) => {
+      budgetTracker.canAfford(config.agent.maxBudgetUsd, issueNumber);
+      await waitForCircuitBreaker(issueNumber);
+      task.currentAction = `Running agent (${difficulty.tier})...`;
+      if (!isHeadless) updateUI(session);
+      let attempt = 0;
+      const response = await withErrorBoundary(
+        async () => {
+          attempt++;
+          // A retry of the main pass starts from a clean base, not the failed attempt's leftovers
+          if (attempt > 1 && resetFirst) await resetWorktree(worktree.path, baseCommit);
+          return runTaskAgent({
+          prompt,
           systemPrompt: buildSystemPrompt(task),
+          tier: difficulty.tier,
           cwd: worktree.path,
-          yolo: config.agent.yolo,
-          maxTurns: config.agent.maxTurns,
-          timeoutMs: config.executor.timeoutMinutes * 60 * 1000,
-        });
-      },
-      `Task #${issueNumber} (${selectedModel})`,
-      {
-        maxRetries: 2,
-        observer: FeatureFlags.ENABLE_METRICS ? errorObserver : undefined,
-      },
-      agentCircuitBreaker
-    );
-
-    logger.info('Agent completed', {
-      issueNumber,
-      sessionId: response.sessionId,
-      cost: response.costUsd,
-      duration: response.durationMs,
-    });
-
-    task.agentSessionId = response.sessionId;
-    task.costUsd = response.costUsd;
-    session.totalCost += response.costUsd;
-
-    task.currentAction = 'Agent completed, committing changes...';
-    if (!isHeadless) updateUI(session);
-
-    // Step 3.5: Verify agent made changes (either committed or uncommitted)
-    try {
-      const { execFile } = await import('node:child_process');
-      const { promisify } = await import('node:util');
-      const execFileAsync = promisify(execFile);
-
-      // First check if agent already committed changes
-      const { stdout: logOutput } = await execFileAsync('git', ['log', '--oneline', '-1'], {
-        cwd: worktree.path,
-      });
-
-      const latestCommit = logOutput.trim();
-      const isAgentCommit = latestCommit && !latestCommit.includes('Initial commit');
-
-      // Check if there are uncommitted changes
-      const { stdout: statusOutput } = await execFileAsync('git', ['status', '--porcelain'], {
-        cwd: worktree.path,
-      });
-
-      if (isAgentCommit) {
-        logger.info('Agent committed changes', { issueNumber, commit: latestCommit.substring(0, 50) });
-      } else if (statusOutput.trim()) {
-        // Agent didn't commit, so we commit for them
-        await execFileAsync('git', ['add', '-A'], { cwd: worktree.path });
-
-        const commitMessage = `fix: ${task.title}
-
-Resolves #${issueNumber}
-
-${task.body.split('\n').slice(0, 3).join('\n')}
-
-Co-authored-by: Claude AI <noreply@anthropic.com>`;
-
-        await execFileAsync('git', ['commit', '-m', commitMessage], {
-          cwd: worktree.path,
-        });
-
-        logger.info('Changes committed by executor', { issueNumber });
-      } else {
-        logger.error('No changes detected - agent failed to implement solution', {
-          issueNumber,
-          hint: 'Agent should make code changes and commit them'
-        });
-        throw new Error('Agent completed but made no changes. Expected code changes or commits.');
-      }
-    } catch (err) {
-      logger.error('Failed to verify/commit changes', {
+          timeoutMs,
+          agent: config.agent,
+          baseCommit: resetFirst ? baseCommit : undefined,
+          label: `#${issueNumber}`,
+          });
+        },
+        `Task #${issueNumber}`,
+        {
+          maxRetries: 1,
+          observer: FeatureFlags.ENABLE_METRICS ? errorObserver : undefined,
+        },
+        agentCircuitBreaker
+      );
+      task.agentSessionId = response.sessionId;
+      task.costUsd = (task.costUsd ?? 0) + response.costUsd;
+      task.metadata = { ...task.metadata, engine: response.engine, model: response.model };
+      session.totalCost += response.costUsd;
+      budgetTracker.recordCost(response.costUsd);
+      logger.info('Agent completed', {
         issueNumber,
-        error: err instanceof Error ? err.message : String(err),
+        engine: response.engine,
+        model: response.model,
+        sessionId: response.sessionId,
+        cost: response.costUsd,
+        duration: response.durationMs,
       });
-      throw err;
+      return response;
+    };
+
+    let response = await runAgent(buildTaskPrompt(task), true);
+
+    // Step 4: Make sure there is real work on the branch (commit leftovers for the agent)
+    task.currentAction = 'Checking agent changes...';
+    if (!isHeadless) updateUI(session);
+    await ensureChangesCommitted(task, worktree.path, baseCommit, response.content, response.engine);
+
+    // Step 4.5: Optional verification (e.g. cargo test) with one fix-up attempt
+    if (config.executor.verifyCommand) {
+      const verifyCommand = config.executor.verifyCommand;
+      let result = await runVerifyCommand(verifyCommand, worktree.path, config.executor.verifyTimeoutMinutes);
+      const baselineRed = !result.ok && config.executor.verifyBaseline
+        ? !(await baselinePasses(verifyCommand, baseCommit, config))
+        : false;
+      if (baselineRed) {
+        logger.warn('Verification fails on the untouched base too; not blaming the agent', { issueNumber, baseCommit: baseCommit.slice(0, 8) });
+        task.metadata = { ...task.metadata, verification: 'failed-baseline-red' };
+      } else if (!result.ok) {
+        logger.warn('Verification failed, asking agent to fix', { issueNumber, output: stripAnsi(result.output).slice(-500) });
+        task.currentAction = 'Verification failed, fixing...';
+        if (!isHeadless) updateUI(session);
+        response = await runAgent(buildFixPrompt(task, verifyCommand, result.output), false);
+        await ensureChangesCommitted(task, worktree.path, baseCommit, response.content, response.engine);
+        result = await runVerifyCommand(verifyCommand, worktree.path, config.executor.verifyTimeoutMinutes);
+        if (!result.ok) {
+          throw new Error(`Verification still failing after fix attempt (${verifyCommand}): ${stripAnsi(result.output).slice(-800)}`);
+        }
+      }
+      if (!baselineRed) {
+        task.metadata = { ...task.metadata, verification: 'passed' };
+        logger.info('Verification passed', { issueNumber, command: verifyCommand });
+      }
     }
 
     task.currentAction = 'Changes committed, gathering metrics...';
     if (!isHeadless) updateUI(session);
 
-    // Step 4: Gather task metrics
+    // Step 4.9: Gather task metrics (whole branch, not just the last commit)
     try {
-      const metrics = await gatherTaskMetrics(worktree.path);
+      const metrics = await gatherTaskMetrics(worktree.path, baseCommit);
       task.metadata = {
         ...task.metadata,
         linesAdded: metrics.linesAdded,
@@ -978,11 +1013,18 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
       logger.warn('Failed to gather metrics', { issueNumber });
     }
 
-    // Step 5: Create PR (if configured)
+    // Step 5: Publish result using the configured workflow
     if (config.executor.createPr) {
+      task.currentAction = 'Creating pull request...';
+      if (!isHeadless) updateUI(session);
+
       const prNumber = await createPR(task, worktree.branch, config, worktree.path);
       task.prNumber = prNumber;
-      logger.info('PR created', { issueNumber, prNumber });
+    } else {
+      task.currentAction = 'Merging changes and closing issue...';
+      if (!isHeadless) updateUI(session);
+
+      await withMergeWorkflowLock(() => mergeAndCloseIssue(task, config, worktree.branch));
     }
 
     // Mark as completed
@@ -1008,15 +1050,23 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
       duration: Date.now() - startTime,
     });
   } catch (err) {
-    logger.error('Task failed', {
-      issueNumber,
-      error: err instanceof Error ? err.message : String(err),
-    });
-
-    task.status = 'failed';
-    task.error = err instanceof Error ? err.message : String(err);
-    task.completedAt = new Date();
+    const message = err instanceof Error ? err.message : String(err);
     completeTask(scheduler, issueNumber, false);
+
+    if (err instanceof AllEnginesExhaustedError) {
+      haltReason = message;
+      logger.warn('Task paused: no engine has usage left', { issueNumber, reason: message });
+      // completeTask counted it as failed; it is really unstarted work
+      scheduler.failed = Math.max(0, scheduler.failed - 1);
+      task.status = 'pending';
+      task.error = message;
+      task.completedAt = undefined;
+    } else {
+      logger.error('Task failed', { issueNumber, error: message });
+      task.status = 'failed';
+      task.error = message;
+      task.completedAt = new Date();
+    }
 
     // Broadcast status update
     if (stopDashboard) {
@@ -1047,6 +1097,213 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
 }
 
 /**
+ * After repeated agent failures the breaker opens for its cool-down. Wait it out
+ * instead of instantly failing every queued task (which would drain an overnight queue).
+ */
+async function waitForCircuitBreaker(issueNumber: number): Promise<void> {
+  if (!agentCircuitBreaker.isOpen()) return;
+  logger.warn('Agent circuit breaker open; waiting for cool-down before starting task', { issueNumber });
+  while (agentCircuitBreaker.isOpen()) {
+    if (haltReason) return;
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+}
+
+export function buildBranchName(template: string, task: Pick<Task, 'issueNumber' | 'title'>): string {
+  const keyMatch = task.title.match(/\[([A-Za-z][A-Za-z0-9]*-\d+)\]/);
+  const key = keyMatch ? keyMatch[1].toLowerCase() : `issue-${task.issueNumber}`;
+  const slug = task.title
+    .replace(/\[[^\]]*\]/g, ' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .split('-')
+    .filter(Boolean)
+    .slice(0, 6)
+    .join('-') || 'task';
+  const name = template
+    .replace(/\{issue\}/g, String(task.issueNumber))
+    .replace(/\{key\}/g, key)
+    .replace(/\{slug\}/g, slug)
+    .replace(/[^A-Za-z0-9._/-]+/g, '-')
+    .replace(/\/{2,}/g, '/')
+    .replace(/^[-/.]+|[-/.]+$/g, '');
+  return name || `autoissue/issue-${task.issueNumber}`;
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+/** verifyCommand result on the untouched base, cached per base commit (shared by parallel tasks). */
+const baselineCache = new Map<string, Promise<boolean>>();
+
+async function baselinePasses(command: string, baseCommit: string, config: AutoissueConfig): Promise<boolean> {
+  const key = `${command}\u0000${baseCommit}`;
+  let pending = baselineCache.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const { worktree, cleanup } = await createWorktree(`autoissue/baseline-${baseCommit.slice(0, 12)}`, {
+        baseBranch: baseCommit,
+        prefix: 'autoissue-',
+        force: true,
+        repoPath: config.project.path,
+      });
+      try {
+        logger.info('Checking verification on untouched base', { baseCommit: baseCommit.slice(0, 8) });
+        const result = await runVerifyCommand(command, worktree.path, config.executor.verifyTimeoutMinutes);
+        logger.info('Baseline verification result', { baseCommit: baseCommit.slice(0, 8), ok: result.ok });
+        return result.ok;
+      } finally {
+        await cleanup().catch(() => undefined);
+        await execFileAsync('git', ['branch', '-D', worktree.branch], { cwd: config.project.path }).catch(() => undefined);
+      }
+    })();
+    baselineCache.set(key, pending);
+  }
+  return pending;
+}
+
+function resolveForcedTier(config: AutoissueConfig): Difficulty | 'auto' {
+  if (config.agent.tier !== 'auto') return config.agent.tier;
+  // Back-compat: agent.model opus/haiku used to force the model
+  if (config.agent.model === 'opus') return 'complex';
+  if (config.agent.model === 'haiku') return 'simple';
+  return 'auto';
+}
+
+/**
+ * Ensure the branch has commits beyond the base. Uncommitted leftovers are committed
+ * for the agent. No changes at all → the task fails with the agent's own explanation.
+ */
+async function ensureChangesCommitted(
+  task: Task,
+  cwd: string,
+  baseCommit: string,
+  agentMessage: string,
+  engine: 'codex' | 'claude',
+): Promise<void> {
+  const { stdout: statusOutput } = await execFileAsync('git', ['status', '--porcelain'], { cwd });
+  if (statusOutput.trim()) {
+    await execFileAsync('git', ['add', '-A'], { cwd });
+    const coAuthor = engine === 'codex'
+      ? 'Co-authored-by: Codex <noreply@openai.com>'
+      : 'Co-authored-by: Claude <noreply@anthropic.com>';
+    const commitMessage = `fix: ${task.title}\n\nRefs #${task.issueNumber}\n\nCommitted by Autoissue (agent left changes uncommitted).\n\n${coAuthor}`;
+    await execFileAsync('git', ['commit', '-m', commitMessage], { cwd });
+    logger.info('Uncommitted agent changes committed by executor', { issueNumber: task.issueNumber });
+  }
+
+  const { stdout: countOut } = await execFileAsync('git', ['rev-list', '--count', `${baseCommit}..HEAD`], { cwd });
+  const commits = parseInt(countOut.trim(), 10) || 0;
+  if (commits === 0) {
+    const explanation = agentMessage.trim().slice(-600);
+    throw new Error(`Agent made no changes.${explanation ? ` Agent said: ${explanation}` : ''}`);
+  }
+
+  const { stdout: diffOut } = await execFileAsync('git', ['diff', '--name-only', baseCommit, 'HEAD'], { cwd });
+  if (!diffOut.trim()) {
+    throw new Error('Agent commits produce no net diff against the base branch.');
+  }
+  logger.info('Agent changes present', { issueNumber: task.issueNumber, commits });
+}
+
+async function runVerifyCommand(command: string, cwd: string, timeoutMinutes: number): Promise<{ ok: boolean; output: string }> {
+  try {
+    const { stdout, stderr } = await execFileAsync('/bin/sh', ['-c', command], {
+      cwd,
+      timeout: timeoutMinutes * 60 * 1000,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    return { ok: true, output: `${stdout}\n${stderr}` };
+  } catch (err: any) {
+    const output = `${err?.stdout ?? ''}\n${err?.stderr ?? ''}\n${err?.message ?? ''}`;
+    return { ok: false, output };
+  }
+}
+
+function finishSession(session: SessionState): void {
+  if (haltReason) {
+    session.status = 'paused';
+    logger.warn('Run paused: all agent engines are out of usage', {
+      reason: haltReason,
+      pending: session.tasks.filter((t) => t.status === 'pending').map((t) => t.issueNumber),
+    });
+  } else {
+    session.status = 'completed';
+  }
+  session.completedAt = new Date().toISOString();
+}
+
+async function getCurrentBranch(cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
+    cwd,
+  });
+  return stdout.trim();
+}
+
+function assertMergeTargetAllowed(branch: string): void {
+  if (!branch) return;
+  if (!PROTECTED_DIRECT_PUSH_BRANCHES.has(branch)) return;
+  if (process.env.AUTOISSUE_ALLOW_PROTECTED_PUSH === 'true') return;
+
+  throw new Error(
+    `Refusing to direct-push protected branch '${branch}'. ` +
+    `Run Autoissue from a feature branch, enable PR mode with executor.createPr=true, ` +
+    `or set AUTOISSUE_ALLOW_PROTECTED_PUSH=true if this direct push is intentional.`
+  );
+}
+
+async function withMergeWorkflowLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = mergeWorkflowQueue;
+  let release!: () => void;
+  mergeWorkflowQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+async function mergeAndCloseIssue(
+  task: Task,
+  config: AutoissueConfig,
+  worktreeBranch: string,
+): Promise<void> {
+  const targetBranch = await getCurrentBranch(config.project.path);
+  if (!targetBranch) {
+    throw new Error('Could not determine current branch for merge workflow.');
+  }
+
+  assertMergeTargetAllowed(targetBranch);
+
+  logger.info('Merging worktree branch to current branch', {
+    issueNumber: task.issueNumber,
+    worktreeBranch,
+    targetBranch,
+  });
+
+  await execFileAsync('git', ['merge', '--no-ff', worktreeBranch, '-m', `Merge autoissue/${task.issueNumber}: ${task.title}`], {
+    cwd: config.project.path,
+  });
+
+  logger.info('Merged successfully', { issueNumber: task.issueNumber, targetBranch });
+
+  await execFileAsync('git', ['push', 'origin', targetBranch], {
+    cwd: config.project.path,
+  });
+
+  logger.info('Pushed to remote', { issueNumber: task.issueNumber, targetBranch });
+
+  await githubApi.closeIssue(config.project.repo, task.issueNumber);
+  logger.info('Issue closed', { issueNumber: task.issueNumber });
+}
+
+/**
  * Print execution summary with PR links and metrics.
  */
 function printExecutionSummary(session: SessionState): void {
@@ -1057,17 +1314,28 @@ function printExecutionSummary(session: SessionState): void {
   console.log('📊 EXECUTION SUMMARY');
   console.log('='.repeat(60));
 
+  const pending = session.tasks.filter(t => t.status === 'pending');
   console.log(`\n✅ Completed: ${completed.length} tasks`);
   console.log(`❌ Failed: ${failed.length} tasks`);
+  if (pending.length > 0) {
+    console.log(`⏸️  Not started: ${pending.length} tasks`);
+  }
   console.log(`💰 Total cost: $${session.totalCost.toFixed(2)}`);
   console.log(`⏱️  Duration: ${getDuration(session)}`);
 
   if (completed.length > 0) {
-    console.log('\n✅ Successful PRs:');
+    console.log(session.config.executor.createPr ? '\n✅ Successful PRs:' : '\n✅ Merged Tasks:');
     completed.forEach(t => {
-      const prUrl = `https://github.com/${session.config.project.repo}/pull/${t.prNumber}`;
       console.log(`  #${t.issueNumber}: ${t.title}`);
-      console.log(`    → PR #${t.prNumber}: ${prUrl}`);
+      if (t.prNumber) {
+        const prUrl = `https://github.com/${session.config.project.repo}/pull/${t.prNumber}`;
+        console.log(`    → PR #${t.prNumber}: ${prUrl}`);
+      } else if (!session.config.executor.createPr) {
+        console.log(`    → merged to ${session.config.project.baseBranch}`);
+      }
+      if (t.metadata?.engine) {
+        console.log(`    🤖 ${t.metadata.engine} / ${t.metadata.model} (${t.metadata.difficulty})`);
+      }
       console.log(`    💰 Cost: $${(t.costUsd || 0).toFixed(2)}`);
       if (t.metadata?.linesAdded || t.metadata?.linesRemoved) {
         console.log(`    📝 Changes: +${t.metadata.linesAdded || 0} -${t.metadata.linesRemoved || 0} lines, ${t.metadata.filesChanged || 0} files`);
@@ -1079,8 +1347,26 @@ function printExecutionSummary(session: SessionState): void {
     console.log('\n❌ Failed Tasks:');
     failed.forEach(t => {
       console.log(`  #${t.issueNumber}: ${t.title}`);
-      console.log(`    Error: ${t.error?.slice(0, 100)}`);
+      console.log(`    Error: ${t.error?.slice(0, 300)}`);
     });
+  }
+
+  if (pending.length > 0) {
+    console.log('\n⏸️  Not started:');
+    pending.forEach(t => {
+      console.log(`  #${t.issueNumber}: ${t.title}${t.error ? ` (${t.error.slice(0, 160)})` : ''}`);
+    });
+    if (session.status === 'paused') {
+      console.log('    → all engines are out of usage; run `autoissue resume` later');
+    }
+  }
+
+  const exhaustedEngines = getExhaustedEngines();
+  if (exhaustedEngines.size > 0) {
+    console.log('\n⚠️  Engines that hit a usage limit this run:');
+    for (const [engine, info] of exhaustedEngines) {
+      console.log(`  ${engine}: ${info.reason}${info.resetHint ? ` (${info.resetHint})` : ''}`);
+    }
   }
 
   // Cost breakdown by domain
@@ -1127,4 +1413,3 @@ function getDuration(session: SessionState): string {
   const seconds = Math.floor((durationMs % 60000) / 1000);
   return `${minutes}m ${seconds}s`;
 }
-

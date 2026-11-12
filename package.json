@@ -19,7 +19,9 @@
     "autoissue"
   ],
   "bin": {
-    "autoissue": "./dist/index.js"
+    "autoissue": "./dist/index.js",
+    "autoissue-status": "./dist/status.js",
+    "autoissue-stop": "./dist/stop.js"
   },
   "files": [
     "dist",
@@ -27,7 +29,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js",
+    "build": "tsc && chmod +x dist/index.js dist/status.js dist/stop.js",
     "dev": "tsx index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -66,6 +68,6 @@
     "vitest": "^4.0.18"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

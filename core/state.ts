@@ -4,10 +4,11 @@
  * Manages session state saving and loading for crash recovery.
  */
 
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import type { SessionState } from '../lib/types.js';
+import { AutoissueConfigSchema } from '../lib/types.js';
 import { logger } from '../lib/logger.js';
 
 const STATE_DIR = join(homedir(), '.autoissue', 'sessions');
@@ -63,6 +64,11 @@ export function loadState(sessionId: string): SessionState | null {
 
     const data = readFileSync(path, 'utf-8');
     const session = JSON.parse(data) as SessionState;
+    // Older sessions predate newer config fields; re-parse to fill defaults
+    const parsedConfig = AutoissueConfigSchema.safeParse(session.config);
+    if (parsedConfig.success) {
+      session.config = parsedConfig.data;
+    }
     logger.info('State loaded', { sessionId, tasks: session.tasks.length });
     return session;
   } catch (err) {
@@ -80,10 +86,14 @@ export function loadState(sessionId: string): SessionState | null {
 export function listSessions(): string[] {
   try {
     ensureStateDir();
-    const { readdirSync } = require('node:fs');
     return readdirSync(STATE_DIR)
       .filter((f: string) => f.endsWith('.json'))
-      .map((f: string) => f.replace('.json', ''));
+      .map((f: string) => ({
+        id: f.replace('.json', ''),
+        mtimeMs: statSync(join(STATE_DIR, f)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map((session) => session.id);
   } catch (err) {
     logger.error('Failed to list sessions', {
       error: err instanceof Error ? err.message : String(err),

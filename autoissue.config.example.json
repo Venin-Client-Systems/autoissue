@@ -8,10 +8,22 @@
     "maxParallel": 3,
     "timeoutMinutes": 30,
     "createPr": true,
-    "prDraft": false
+    "prDraft": false,
+    "verifyCommand": "npm test",
+    "verifyTimeoutMinutes": 20,
+    "verifyBaseline": true,
+    "skipIssuesWithOpenPr": true,
+    "branchTemplate": "autoissue/issue-{issue}"
   },
   "agent": {
-    "model": "sonnet",
+    "engines": ["codex", "claude"],
+    "tier": "auto",
+    "codexModels": {
+      "simple": { "model": "gpt-6-luna", "effort": "medium" },
+      "medium": { "model": "gpt-6.1-sol", "effort": "medium" },
+      "complex": { "model": "gpt-6-astra", "effort": "high" }
+    },
+    "claudeModels": { "simple": "haiku", "medium": "sonnet", "complex": "opus" },
     "maxBudgetUsd": 5.0,
     "yolo": true
   },

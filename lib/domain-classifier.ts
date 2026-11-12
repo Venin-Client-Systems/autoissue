@@ -113,13 +113,14 @@ function extractTitleTag(title: string): Domain | null {
  */
 function classifyByLabels(labels: string[]): Domain {
   for (const label of labels) {
-    if (/backend|api|server/.test(label)) return 'backend';
-    if (/frontend|ui|ux|component/.test(label)) return 'frontend';
-    if (/database|db|schema|migration/.test(label)) return 'database';
-    if (/test|testing|e2e|qa/.test(label)) return 'testing';
-    if (/documentation|docs/.test(label)) return 'documentation';
-    if (/infra|ci|deploy|docker|devops/.test(label)) return 'infrastructure';
-    if (/security|vuln|cve/.test(label)) return 'security';
+    const normalized = label.trim().toLowerCase();
+    if (/^(backend|api|server)$/.test(normalized)) return 'backend';
+    if (/^(frontend|ui|ux|component)$/.test(normalized)) return 'frontend';
+    if (/^(database|db|schema|migration)$/.test(normalized)) return 'database';
+    if (/^(test|tests|testing|e2e|qa)$/.test(normalized)) return 'testing';
+    if (/^(documentation|docs?)$/.test(normalized)) return 'documentation';
+    if (/^(infra|infrastructure|ci|deploy|docker|devops)$/.test(normalized)) return 'infrastructure';
+    if (/^(security|vuln|cve)$/.test(normalized)) return 'security';
   }
   return 'unknown';
 }

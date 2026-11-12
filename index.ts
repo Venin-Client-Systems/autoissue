@@ -12,6 +12,10 @@ import { executeIssues, executePlannerMode, resumeExecution } from './core/execu
 import { loadState, listSessions } from './core/state.js';
 import { logger } from './lib/logger.js';
 import type { AutoissueConfig } from './lib/types.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 let shutdownRequested = false;
 const activeControllers = new Set<AbortController>();
@@ -72,8 +76,11 @@ async function main(): Promise<void> {
       case 'metrics':
         await handleMetricsCommand(cliOptions);
         break;
+      case 'stop':
+        await handleStopCommand(cliOptions);
+        break;
       default:
-        throw new Error('No valid subcommand specified. Use: exec, plan, resume, status, or metrics');
+        throw new Error('No valid subcommand specified. Use: exec, plan, resume, status, metrics, or stop');
     }
   } catch (err) {
     logger.error('Fatal error', {
@@ -186,11 +193,18 @@ async function handleStatusCommand(cliOptions: ParsedCliOptions): Promise<void> 
     return;
   }
 
-  console.log(`Recent sessions (showing last 10):\n`);
+  const label = cliOptions.statusLabel;
+  console.log(label
+    ? `Recent sessions for "${label}" (showing last 10):\n`
+    : `Recent sessions (showing last 10):\n`);
 
-  for (const sessionId of sessions.slice(0, 10)) {
+  let shown = 0;
+  for (const sessionId of sessions) {
     const session = loadState(sessionId);
     if (!session) continue;
+    if (label && session.label !== label) continue;
+    if (shown >= 10) break;
+    shown++;
 
     const status = session.status === 'completed' ? '✅' :
                    session.status === 'failed' ? '❌' :
@@ -211,6 +225,101 @@ async function handleStatusCommand(cliOptions: ParsedCliOptions): Promise<void> 
       console.log(`   Directive: ${session.directive.slice(0, 60)}...`);
     }
     console.log();
+  }
+
+  if (shown === 0 && label) {
+    console.log(`No sessions found for label "${label}".`);
+  }
+}
+
+/**
+ * Handle `autoissue stop [label]` command.
+ */
+async function handleStopCommand(cliOptions: ParsedCliOptions): Promise<void> {
+  const targets = await findAutoissueProcesses(cliOptions.stopLabel);
+
+  if (targets.length === 0) {
+    console.log(cliOptions.stopLabel
+      ? `No running Autoissue processes found for "${cliOptions.stopLabel}".`
+      : 'No running Autoissue processes found.');
+    return;
+  }
+
+  console.log(`Stopping ${targets.length} Autoissue process${targets.length === 1 ? '' : 'es'}...`);
+
+  for (const target of targets) {
+    try {
+      process.kill(target.pid, 'SIGINT');
+      console.log(`  SIGINT ${target.pid}: ${target.command}`);
+    } catch (err) {
+      logger.warn('Failed to send SIGINT', {
+        pid: target.pid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  for (const target of targets) {
+    if (!isProcessAlive(target.pid)) continue;
+    try {
+      process.kill(target.pid, 'SIGTERM');
+      console.log(`  SIGTERM ${target.pid}: still running after graceful stop`);
+    } catch {
+      // Process exited between the liveness check and SIGTERM.
+    }
+  }
+}
+
+interface AutoissueProcess {
+  pid: number;
+  command: string;
+}
+
+async function findAutoissueProcesses(label?: string): Promise<AutoissueProcess[]> {
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], {
+    encoding: 'utf-8',
+    maxBuffer: 1024 * 1024,
+  });
+
+  return stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map((line): AutoissueProcess | null => {
+      const match = line.match(/^(\d+)\s+(.+)$/);
+      if (!match) return null;
+      return { pid: Number(match[1]), command: match[2] };
+    })
+    .filter((processInfo): processInfo is AutoissueProcess => {
+      if (!processInfo || processInfo.pid === process.pid) return false;
+      return isAutoissueWorkerCommand(processInfo.command, label);
+    });
+}
+
+function isAutoissueWorkerCommand(command: string, label?: string): boolean {
+  const isRunner =
+    /\bautoissue\b/.test(command) ||
+    /\/dist\/index\.js\b/.test(command);
+
+  if (!isRunner) return false;
+  if (/\b(autoissue-status|autoissue-stop)\b/.test(command)) return false;
+  if (/\b(status|metrics|stop)\b/.test(command)) return false;
+
+  const isWorkCommand = /\b(exec|plan|resume)\b/.test(command) || /\/dist\/index\.js\b/.test(command);
+  if (!isWorkCommand) return false;
+  if (label && !command.includes(label)) return false;
+
+  return true;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -305,13 +414,20 @@ async function loadConfigWithFallback(cliOptions: ParsedCliOptions): Promise<Aut
 /**
  * Print session summary.
  */
+/**
+ * Print the final summary and set the process exit code for scripts/schedulers:
+ * 0 = everything done, 2 = some tasks failed or not started, 3 = paused (engines out of usage; run `autoissue resume`).
+ */
 function printSessionSummary(session: any): void {
   const completed = session.tasks.filter((t: any) => t.status === 'completed').length;
   const failed = session.tasks.filter((t: any) => t.status === 'failed').length;
+  const pending = session.tasks.filter((t: any) => t.status === 'pending').length;
   const total = session.tasks.length;
 
   // Show success/failure based on actual results
-  if (completed === 0 && failed > 0) {
+  if (session.status === 'paused') {
+    console.log('\n⏸️  Execution paused - all agent engines are out of usage. Run `autoissue resume` later.');
+  } else if (completed === 0 && failed > 0) {
     console.log('\n❌ Execution failed - all tasks unsuccessful!');
   } else if (completed === total) {
     console.log('\n✅ Execution complete - all tasks successful!');
@@ -324,8 +440,12 @@ function printSessionSummary(session: any): void {
   console.log(`   Total tasks: ${total}`);
   console.log(`   Completed: ${completed}`);
   console.log(`   Failed: ${failed}`);
+  if (pending > 0) console.log(`   Not started: ${pending}`);
   console.log(`   Total cost: $${session.totalCost.toFixed(2)}`);
+  console.log(`   Session: ${session.sessionId}`);
   console.log();
+
+  process.exitCode = session.status === 'paused' ? 3 : failed > 0 || pending > 0 ? 2 : 0;
 }
 
 main();

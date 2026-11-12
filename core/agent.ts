@@ -4,6 +4,7 @@ import { logger } from '../lib/logger.js';
 import type { ClaudeJsonOutput } from '../lib/types.js';
 import { DEFAULT_MAX_TURNS } from '../lib/types.js';
 import { withErrorBoundary, CircuitBreaker } from './error-boundaries.js';
+import { UsageLimitError, EngineUnavailableError, isUsageLimitText } from './usage-limit.js';
 import {
   validateModel,
   validateBudget,
@@ -24,14 +25,23 @@ let claudeBin: string | null = null;
 // Shared across all agents to prevent cascading failures
 const agentCircuitBreaker = new CircuitBreaker(5, 60000);
 
+/** Test helper. */
+export function setClaudeBinForTests(bin: string | null): void {
+  claudeBin = bin;
+}
+
 async function getClaudeBin(): Promise<string> {
   if (claudeBin) return claudeBin;
+  if (process.env.AUTOISSUE_CLAUDE_BIN) {
+    claudeBin = process.env.AUTOISSUE_CLAUDE_BIN;
+    return claudeBin;
+  }
   try {
     const { stdout } = await execFileAsync('which', ['claude'], { encoding: 'utf-8' });
     claudeBin = stdout.trim();
     return claudeBin;
   } catch {
-    throw new Error('claude CLI not found. Install from https://claude.ai/cli');
+    throw new EngineUnavailableError('claude', 'claude CLI not found on PATH');
   }
 }
 
@@ -154,8 +164,19 @@ async function runClaude(args: string[], timeoutMs: number, cwd?: string): Promi
       const stderr = Buffer.concat(errChunks).toString('utf-8');
 
       if (code !== 0) {
-        logger.error('Claude process failed', { code: code ?? -1, stderr: stderr.slice(0, 500) });
-        reject(new Error(`Claude exited ${code}: ${stderr.slice(0, 500)}`));
+        // With --output-format json Claude reports errors on stdout; stderr is often empty.
+        let detail = stderr.trim();
+        try {
+          const parsed = parseOutput(stdout);
+          detail = [parsed.result, detail].filter(Boolean).join(' | ');
+        } catch { /* not JSON */ }
+        if (!detail) detail = stdout.trim().slice(-500);
+        if (isUsageLimitText(detail)) {
+          reject(new UsageLimitError('claude', detail.slice(0, 500)));
+          return;
+        }
+        logger.error('Claude process failed', { code: code ?? -1, detail: detail.slice(0, 500) });
+        reject(new Error(`Claude exited ${code}: ${detail.slice(0, 500)}`));
         return;
       }
       resolve(stdout);
@@ -166,7 +187,7 @@ async function runClaude(args: string[], timeoutMs: number, cwd?: string): Promi
       if (killTimer) clearTimeout(killTimer);
       if (settled) return;
       settled = true;
-      reject(new Error(`Failed to spawn claude: ${err.message}`));
+      reject(new EngineUnavailableError('claude', `failed to spawn: ${err.message}`));
     });
   });
 }
@@ -209,61 +230,73 @@ function parseOutput(stdout: string): ClaudeJsonOutput {
   throw new Error(`Failed to parse Claude JSON output (expected {result: string}). Got: ${preview}`);
 }
 
-/** Spawn a new Claude session */
+/**
+ * Run one Claude session with no retries.
+ *
+ * Throws UsageLimitError when the account is out of usage, so callers can fall
+ * back to another engine instead of retrying.
+ */
+export async function runClaudeOnce(
+  prompt: string,
+  opts: SpawnOptions,
+): Promise<AgentResponse> {
+  validatePrompt(prompt, 'prompt');
+  validateModel(opts.model);
+  validateBudget(opts.maxBudgetUsd);
+  validatePrompt(opts.systemPrompt, 'systemPrompt');
+
+  if (opts.timeoutMs !== undefined) {
+    validateTimeout(opts.timeoutMs);
+  }
+
+  if (opts.cwd !== undefined) {
+    validateCwd(opts.cwd);
+  }
+
+  const start = Date.now();
+  const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS[opts.model] ?? 8;
+  const args = [
+    '-p', prompt,
+    '--output-format', 'json',
+    '--model', opts.model,
+    '--max-turns', String(maxTurns),
+    '--append-system-prompt', opts.systemPrompt,
+  ];
+
+  if (opts.maxBudgetUsd > 0) {
+    args.push('--max-budget-usd', opts.maxBudgetUsd.toString());
+  }
+
+  if (opts.yolo) {
+    args.push('--dangerously-skip-permissions');
+  }
+
+  logger.debug('Spawning agent', { model: opts.model, maxTurns, cwd: opts.cwd });
+  const stdout = await runClaude(args, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, opts.cwd);
+  const output = parseOutput(stdout);
+
+  if (output.is_error === true) {
+    if (isUsageLimitText(output.result)) {
+      throw new UsageLimitError('claude', output.result);
+    }
+    throw new Error(`Claude agent error: ${output.result}`);
+  }
+
+  return {
+    content: output.result,
+    sessionId: output.session_id,
+    costUsd: output.total_cost_usd ?? 0,
+    durationMs: Date.now() - start,
+  };
+}
+
+/** Spawn a new Claude session (with retries for transient failures) */
 export async function spawnAgent(
   prompt: string,
   opts: SpawnOptions,
 ): Promise<AgentResponse> {
   return withErrorBoundary(
-    async () => {
-      // Validate all inputs before spawning
-      validatePrompt(prompt, 'prompt');
-      validateModel(opts.model);
-      validateBudget(opts.maxBudgetUsd);
-      validatePrompt(opts.systemPrompt, 'systemPrompt');
-
-      if (opts.timeoutMs !== undefined) {
-        validateTimeout(opts.timeoutMs);
-      }
-
-      if (opts.cwd !== undefined) {
-        validateCwd(opts.cwd);
-      }
-
-      const start = Date.now();
-      const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS[opts.model] ?? 8;
-      const args = [
-        '-p', prompt,
-        '--output-format', 'json',
-        '--model', opts.model,
-        '--max-turns', String(maxTurns),
-        '--append-system-prompt', opts.systemPrompt,
-      ];
-
-      if (opts.maxBudgetUsd > 0) {
-        args.push('--max-budget-usd', opts.maxBudgetUsd.toString());
-      }
-
-      if (opts.yolo) {
-        args.push('--dangerously-skip-permissions');
-      }
-
-      logger.debug('Spawning agent', { model: opts.model, maxTurns });
-      logger.info('Claude CLI command', { command: `claude ${args.join(' ')}`, cwd: opts.cwd });
-      const stdout = await runClaude(args, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, opts.cwd);
-      const output = parseOutput(stdout);
-
-      if (output.is_error === true) {
-        throw new Error(`Claude agent error: ${output.result}`);
-      }
-
-      return {
-        content: output.result,
-        sessionId: output.session_id,
-        costUsd: output.total_cost_usd ?? 0,
-        durationMs: Date.now() - start,
-      };
-    },
+    () => runClaudeOnce(prompt, opts),
     `spawnAgent(${opts.model})`,
     {
       maxRetries: 3,
@@ -320,6 +353,9 @@ export async function resumeAgent(
       const output = parseOutput(stdout);
 
       if (output.is_error === true) {
+        if (isUsageLimitText(output.result)) {
+          throw new UsageLimitError('claude', output.result);
+        }
         throw new Error(`Claude agent error: ${output.result}`);
       }
 

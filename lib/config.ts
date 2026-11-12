@@ -106,30 +106,15 @@ export function generateDefaultConfig(cwd: string = process.cwd()): AutoissueCon
     throw new Error(`Invalid git remote: ${remote}. Expected GitHub URL (https:// or git@).`);
   }
 
-  const config: AutoissueConfig = {
+  // Let the schema fill every default so generated and file-based configs never drift
+  const config: AutoissueConfig = AutoissueConfigSchema.parse({
     project: {
       repo,
       path: gitRoot,
-      baseBranch: 'main',
+      baseBranch: getDefaultBranch(gitRoot) ?? 'main',
     },
-    executor: {
-      maxParallel: 3,
-      timeoutMinutes: 30,
-      createPr: true,
-      prDraft: false,
-    },
-    planner: {
-      enabled: true,
-      model: 'sonnet',
-      maxBudgetUsd: 2.0,
-    },
-    agent: {
-      model: 'sonnet',
-      maxBudgetUsd: 5.0,
-      yolo: true,
-    },
-    maxTotalBudgetUsd: 50.0,
-  };
+    planner: {},
+  });
 
   logger.info('Generated default config', { repo });
   return config;
@@ -152,6 +137,22 @@ function getGitRoot(cwd: string): string | null {
       cwd,
       error: err instanceof Error ? err.message : String(err)
     });
+    return null;
+  }
+}
+
+/**
+ * Get the remote's default branch (origin/HEAD), e.g. "main".
+ */
+function getDefaultBranch(gitRoot: string): string | null {
+  try {
+    const ref = execSync('git symbolic-ref --short refs/remotes/origin/HEAD', {
+      cwd: gitRoot,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return ref.replace(/^origin\//, '') || null;
+  } catch {
     return null;
   }
 }
@@ -186,15 +187,9 @@ function getGitRemote(gitRoot: string): string | null {
  * - https://github.com/owner/repo
  */
 function parseGitRemote(remote: string): string | null {
-  // HTTPS format
-  let match = remote.match(/github\.com\/([^\/]+\/[^\/\.]+)/);
-  if (match) return match[1];
-
-  // SSH format
-  match = remote.match(/git@github\.com:([^\/]+\/[^\/\.]+)/);
-  if (match) return match[1];
-
-  return null;
+  // https://github.com/owner/repo(.git), git@github.com:owner/repo(.git), ssh://git@github.com/owner/repo
+  const match = remote.trim().match(/github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/);
+  return match ? match[1] : null;
 }
 
 /**

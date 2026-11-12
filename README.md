@@ -8,8 +8,13 @@
 
 Autoissue is a parallel AI code execution engine that transforms GitHub issues into production-ready pull requests. It intelligently classifies tasks by domain, schedules them for parallel execution, and runs each in an isolated git worktree to prevent conflicts.
 
+> **AI agents (Codex / Claude Code):** read [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) before running autoissue or writing issues for it.
+
 ## ✨ Key Features
 
+- **🔁 Codex first, Claude fallback** - Runs each issue on Codex (ChatGPT plan usage); on a usage limit it resets the worktree and continues on Claude Code. When every engine is out, the run pauses for `autoissue resume`
+- **🎚️ Difficulty-based models** - `difficulty:simple|medium|complex` labels (or a heuristic) pick the model: luna/haiku, sol/sonnet, astra/opus
+- **✅ Verification** - Optional `verifyCommand` (e.g. `cargo test`) with one agent fix-up pass. Pre-existing base failures are detected rather than blamed on the agent
 - **⚡ 10x Faster** - Direct GitHub API via Octokit (no shell overhead)
 - **🔄 Parallel Execution** - Run up to 10 tasks concurrently with smart scheduling
 - **🎯 Domain-Aware** - Backend + Frontend run together, Backend + Backend don't
@@ -44,13 +49,13 @@ autoissue exec autoissue-1
 ```
 
 Autoissue will:
-1. Fetch all open issues labeled `autoissue-1`
-2. Classify each by domain (backend, frontend, database, etc.)
-3. Check budget before execution
+1. Fetch all open issues labeled `autoissue-1` (oldest first; pull requests and issues that already have an open PR are skipped)
+2. Classify each by domain (backend, frontend, database, etc.) and difficulty (simple, medium, complex)
+3. Check budget before each task
 4. Schedule compatible tasks in parallel (3 concurrent by default)
-5. Execute each in an isolated git worktree with circuit breaker protection
-6. Create pull requests for completed tasks
-7. Track costs and provide detailed summary
+5. Execute each in an isolated git worktree branched from a freshly fetched base: Codex first, Claude Code if Codex is out of usage
+6. Require real commits, run the optional `verifyCommand`, then create a pull request (`Closes #N`) for each completed task
+7. Track costs and provide a detailed summary (exit code 0 done, 2 failures, 3 paused on usage limits)
 
 ## 📖 CLI Commands
 
@@ -66,6 +71,12 @@ Process all GitHub issues with the specified label.
 ```bash
 # Execute all issues labeled 'autoissue-1'
 autoissue exec autoissue-1
+
+# Legacy shorthand still works
+autoissue autoissue-1
+
+# Accepted for old Ralphy-style muscle memory; v2 uses executor.maxParallel
+autoissue autoissue-1 --parallel
 
 # Execute with dashboard enabled
 autoissue exec autoissue-1 --dashboard
@@ -117,10 +128,20 @@ autoissue resume --dashboard
 ### Show Session Status
 
 ```bash
-autoissue status
+autoissue status [label]
+autoissue-status [label]
 ```
 
 Display status of recent execution sessions.
+
+### Stop Running Autoissue
+
+```bash
+autoissue stop [label]
+autoissue-stop [label]
+```
+
+Stop running Autoissue execution processes, optionally filtered by label.
 
 ### Show Metrics
 

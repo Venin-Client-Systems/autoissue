@@ -1,4 +1,5 @@
 import { logger } from '../lib/logger.js';
+import { UsageLimitError, EngineUnavailableError, AllEnginesExhaustedError, isUsageLimitText } from './usage-limit.js';
 import { AgentValidationError } from './agent-errors.js';
 
 /**
@@ -36,6 +37,22 @@ export class AgentErrorClassifier {
         message: error.message,
         retryable: false,
         recoveryHint: error.recoveryHint,
+        originalError: error,
+      };
+    }
+
+    // Account usage limits / missing engines: retrying the same engine cannot help
+    if (
+      error instanceof UsageLimitError ||
+      error instanceof EngineUnavailableError ||
+      error instanceof AllEnginesExhaustedError ||
+      isUsageLimitText(error.message)
+    ) {
+      return {
+        type: 'quota_exceeded',
+        message: error.message,
+        retryable: false,
+        recoveryHint: 'Agent account usage limit reached (or engine unavailable). Resume later with `autoissue resume`.',
         originalError: error,
       };
     }

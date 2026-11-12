@@ -271,18 +271,25 @@ export class GitHubAPI {
       cacheKey,
       true, // cacheable
       async () => {
-        return await this.octokit.issues.listForRepo({
+        // Read every page; the issues endpoint also returns PRs, which are dropped below
+        const data = await this.octokit.paginate(this.octokit.issues.listForRepo, {
           owner,
           repo: repoName,
           labels: labels.join(','),
           state: 'open',
           per_page: 100,
+          sort: 'created',
+          direction: 'asc',
         });
+        return { data };
       }
     );
 
-    // Transform and validate Octokit response to our GitHubIssue format
-    return response.data.map((issue) => {
+    // Transform and validate Octokit response to our GitHubIssue format (oldest first)
+    return response.data
+      .filter((issue) => !issue.pull_request)
+      .sort((a, b) => a.number - b.number)
+      .map((issue) => {
       // Map Octokit issue to our format
       const mapped = {
         number: issue.number,
@@ -301,6 +308,28 @@ export class GitHubAPI {
       // Validate with our schema
       return validateGitHubIssue(mapped);
     });
+  }
+
+  /**
+   * Issue numbers that already have an open PR: either an Autoissue branch
+   * (autoissue/issue-N) or a PR body that closes the issue ("Closes #N").
+   */
+  async listIssuesWithOpenPullRequests(repo: string): Promise<Set<number>> {
+    const { owner, repo: repoName } = this.parseRepo(repo);
+    const pulls = await this.octokit.paginate(this.octokit.pulls.list, {
+      owner,
+      repo: repoName,
+      state: 'open',
+      per_page: 100,
+    });
+    const covered = new Set<number>();
+    const closing = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)\b/gi;
+    for (const pr of pulls) {
+      const branchMatch = pr.head?.ref?.match(/^autoissue\/issue-(\d+)$/);
+      if (branchMatch) covered.add(Number(branchMatch[1]));
+      for (const m of (pr.body ?? '').matchAll(closing)) covered.add(Number(m[1]));
+    }
+    return covered;
   }
 
   /**

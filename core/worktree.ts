@@ -10,7 +10,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { logger } from '../lib/logger.js';
 import { WorktreeError, ErrorCode } from '../lib/types.js';
@@ -41,6 +41,10 @@ export interface CreateWorktreeOptions {
   prefix?: string;
   /** Whether to force creation (delete existing) */
   force?: boolean;
+  /** Repository root to run git in and place .worktrees/ under (default: process.cwd()) */
+  repoPath?: string;
+  /** Fetch origin and branch from the freshest of local/origin base (default: false) */
+  fetch?: boolean;
 }
 
 /**
@@ -80,6 +84,8 @@ export async function createWorktree(
     baseBranch = 'main',
     prefix = 'autoissue-',
     force = false,
+    repoPath = process.cwd(),
+    fetch = false,
   } = opts;
 
   // Validate inputs
@@ -92,7 +98,8 @@ export async function createWorktree(
   }
 
   const worktreeName = `${prefix}${branch.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-  const worktreePath = resolve(process.cwd(), `.worktrees/${worktreeName}`);
+  const worktreePath = resolve(repoPath, `.worktrees/${worktreeName}`);
+  const git = (args: string[]) => execFileAsync('git', args, { encoding: 'utf-8', cwd: repoPath });
 
   logger.debug('Creating worktree', { branch, worktreePath, baseBranch });
 
@@ -100,26 +107,34 @@ export async function createWorktree(
   if (existsSync(worktreePath)) {
     if (force) {
       logger.warn('Worktree exists, removing', { worktreePath });
-      await cleanupWorktree(worktreePath);
+      await cleanupWorktree(worktreePath, repoPath);
     } else {
       throw new WorktreeError(`Worktree already exists: ${worktreePath}`, ErrorCode.WORKTREE_BRANCH_EXISTS, worktreePath);
     }
   }
 
   try {
-    // Create the branch if it doesn't exist
-    const branchExists = await checkBranchExists(branch);
-    if (!branchExists) {
-      logger.debug('Creating branch', { branch, baseBranch });
-      await execFileAsync('git', ['branch', branch, baseBranch], { encoding: 'utf-8' });
+    excludeWorktreesDir(repoPath);
+    const startPoint = fetch ? await resolveFreshBase(baseBranch, repoPath) : baseBranch;
+
+    if (force) {
+      // -B resets a leftover branch from an earlier failed run to the fresh base
+      logger.debug('Adding worktree (reset branch)', { branch, worktreePath, startPoint });
+      // --no-track: no upstream config write, so parallel tasks don't race on .git/config
+      await git(['worktree', 'add', '--no-track', '-B', branch, worktreePath, startPoint]);
+    } else {
+      // Create the branch if it doesn't exist
+      const branchExists = await checkBranchExists(branch, repoPath);
+      if (!branchExists) {
+        logger.debug('Creating branch', { branch, baseBranch: startPoint });
+        await git(['branch', branch, startPoint]);
+      }
+      logger.debug('Adding worktree', { branch, worktreePath });
+      await git(['worktree', 'add', worktreePath, branch]);
     }
 
-    // Create the worktree
-    logger.debug('Adding worktree', { branch, worktreePath });
-    await execFileAsync('git', ['worktree', 'add', worktreePath, branch], { encoding: 'utf-8' });
-
     // Get commit SHA
-    const { stdout: commit } = await execFileAsync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' });
+    const { stdout: commit } = await execFileAsync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { encoding: 'utf-8', cwd: repoPath });
 
     const worktree: Worktree = {
       path: worktreePath,
@@ -134,7 +149,7 @@ export async function createWorktree(
     return {
       worktree,
       cleanup: async () => {
-        await cleanupWorktree(worktreePath);
+        await cleanupWorktree(worktreePath, repoPath);
       },
     };
   } catch (err) {
@@ -144,7 +159,7 @@ export async function createWorktree(
     });
 
     try {
-      await cleanupWorktree(worktreePath);
+      await cleanupWorktree(worktreePath, repoPath);
     } catch (cleanupErr) {
       logger.warn('Rollback cleanup failed', {
         error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
@@ -164,37 +179,70 @@ export async function createWorktree(
  *
  * Safe to call multiple times (idempotent).
  */
-export async function cleanupWorktree(worktreePath: string): Promise<void> {
+export async function cleanupWorktree(worktreePath: string, repoPath?: string): Promise<void> {
   logger.debug('Cleaning up worktree', { worktreePath });
 
-  if (!existsSync(worktreePath)) {
-    logger.debug('Worktree does not exist, nothing to clean', { worktreePath });
+  // First, check if git recognizes this as a worktree
+  let isGitWorktree = false;
+  try {
+    const worktrees = await listWorktrees(repoPath);
+    isGitWorktree = worktrees.some((w) => w.path === worktreePath);
+  } catch (err) {
+    logger.warn('Failed to list worktrees during cleanup', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // If git doesn't recognize it but the path exists, prune stale references
+  if (!isGitWorktree && existsSync(worktreePath)) {
+    logger.debug('Worktree path exists but not in git worktree list, pruning stale references', { worktreePath });
+    try {
+      await pruneWorktrees(repoPath);
+      // Check again after pruning
+      const worktreesAfterPrune = await listWorktrees(repoPath);
+      isGitWorktree = worktreesAfterPrune.some((w) => w.path === worktreePath);
+    } catch (err) {
+      logger.warn('Failed to prune worktrees', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // If git doesn't recognize it and path doesn't exist, nothing to do
+  if (!isGitWorktree && !existsSync(worktreePath)) {
+    logger.debug('Worktree does not exist in git or filesystem, nothing to clean', { worktreePath });
     return;
   }
 
-  try {
-    // Remove the worktree
-    await execFileAsync('git', ['worktree', 'remove', worktreePath, '--force'], { encoding: 'utf-8' });
-    logger.info('Worktree removed', { worktreePath });
-  } catch (err) {
-    logger.error('Failed to remove worktree', {
-      worktreePath,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw new WorktreeError(
-      `Failed to remove worktree: ${err instanceof Error ? err.message : String(err)}`,
-      ErrorCode.WORKTREE_CLEANUP_FAILED,
-      worktreePath
-    );
+  // If git recognizes it, remove it properly
+  if (isGitWorktree) {
+    try {
+      await execFileAsync('git', ['worktree', 'remove', worktreePath, '--force'], { encoding: 'utf-8', cwd: repoPath });
+      logger.info('Worktree removed', { worktreePath });
+    } catch (err) {
+      logger.error('Failed to remove worktree', {
+        worktreePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw new WorktreeError(
+        `Failed to remove worktree: ${err instanceof Error ? err.message : String(err)}`,
+        ErrorCode.WORKTREE_CLEANUP_FAILED,
+        worktreePath
+      );
+    }
+  } else {
+    // Path exists but git doesn't recognize it - just log a warning
+    // The worktree was already removed from git's tracking, so consider it cleaned
+    logger.warn('Worktree path exists but not tracked by git, considering it cleaned', { worktreePath });
   }
 }
 
 /**
  * List all git worktrees in the repository.
  */
-export async function listWorktrees(): Promise<Worktree[]> {
+export async function listWorktrees(repoPath?: string): Promise<Worktree[]> {
   try {
-    const { stdout } = await execFileAsync('git', ['worktree', 'list', '--porcelain'], { encoding: 'utf-8' });
+    const { stdout } = await execFileAsync('git', ['worktree', 'list', '--porcelain'], { encoding: 'utf-8', cwd: repoPath });
     return parseWorktreeList(stdout);
   } catch (err) {
     logger.error('Failed to list worktrees', {
@@ -210,9 +258,9 @@ export async function listWorktrees(): Promise<Worktree[]> {
 /**
  * Check if a branch exists in the repository.
  */
-async function checkBranchExists(branch: string): Promise<boolean> {
+async function checkBranchExists(branch: string, repoPath?: string): Promise<boolean> {
   try {
-    await execFileAsync('git', ['rev-parse', '--verify', branch], { encoding: 'utf-8' });
+    await execFileAsync('git', ['rev-parse', '--verify', branch], { encoding: 'utf-8', cwd: repoPath });
     return true;
   } catch {
     return false;
@@ -263,10 +311,10 @@ export async function findWorktreeByBranch(branch: string): Promise<Worktree | n
 /**
  * Prune stale worktree references (worktrees that were manually deleted).
  */
-export async function pruneWorktrees(): Promise<void> {
+export async function pruneWorktrees(repoPath?: string): Promise<void> {
   logger.debug('Pruning stale worktrees');
   try {
-    await execFileAsync('git', ['worktree', 'prune'], { encoding: 'utf-8' });
+    await execFileAsync('git', ['worktree', 'prune'], { encoding: 'utf-8', cwd: repoPath });
     logger.info('Stale worktrees pruned');
   } catch (err) {
     logger.error('Failed to prune worktrees', {
@@ -281,3 +329,52 @@ export async function pruneWorktrees(): Promise<void> {
 
 // Note: withErrorBoundary is not compatible with parametrized functions
 // Use createWorktree directly with try/catch for error handling
+
+/**
+ * Pick the freshest start point for a base branch after fetching origin.
+ *
+ * - local branch contains origin/<base> (up to date or ahead, e.g. unpushed feature work) → local
+ * - origin/<base> is ahead of / diverged from local → origin/<base>
+ * - only one exists → that one
+ */
+export async function resolveFreshBase(baseBranch: string, repoPath: string): Promise<string> {
+  const git = (args: string[]) => execFileAsync('git', args, { encoding: 'utf-8', cwd: repoPath });
+  try {
+    await git(['fetch', '--quiet', 'origin', baseBranch]);
+  } catch (err) {
+    logger.warn('git fetch failed; using local base', {
+      baseBranch,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const remoteRef = `origin/${baseBranch}`;
+  const hasLocal = await checkBranchExists(baseBranch, repoPath);
+  const hasRemote = await checkBranchExists(remoteRef, repoPath);
+
+  if (hasLocal && hasRemote) {
+    try {
+      await git(['merge-base', '--is-ancestor', remoteRef, baseBranch]);
+      return baseBranch;
+    } catch {
+      logger.info('Local base is behind origin; branching from origin', { baseBranch });
+      return remoteRef;
+    }
+  }
+  if (hasRemote) return remoteRef;
+  return baseBranch;
+}
+
+/** Keep .worktrees/ out of the target repo's git status (local-only, via .git/info/exclude). */
+function excludeWorktreesDir(repoPath: string): void {
+  try {
+    const excludePath = resolve(repoPath, '.git', 'info', 'exclude');
+    if (!existsSync(excludePath)) return;
+    const current = readFileSync(excludePath, 'utf-8');
+    if (!/^\/?\.worktrees\/?$/m.test(current)) {
+      appendFileSync(excludePath, `${current.endsWith('\n') || current === '' ? '' : '\n'}.worktrees/\n`);
+    }
+  } catch {
+    // best effort only
+  }
+}
