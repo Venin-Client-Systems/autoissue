@@ -537,4 +537,4 @@ MIT License - see [LICENSE](./LICENSE) for details.
 
 ---
 
-**Made with ⚡ by [Venin Client Systems](https://github.com/Venin-Client-Systems)**
+**Made with ⚡ by [VENIN](https://venin.space)**
