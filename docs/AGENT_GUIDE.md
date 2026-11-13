@@ -153,6 +153,6 @@ by autoissue itself.
 
 ## Requirements
 
-Node 20+, `gh` authenticated (or `GITHUB_TOKEN`), and at least one of `codex` (logged in with
+Node 22+ (as `package.json` requires), `gh` authenticated (or `GITHUB_TOKEN`), and at least one of `codex` (logged in with
 ChatGPT) or `claude` on `PATH`. Dependencies must be installed once:
 `cd ~/Developer/real-projects/autoissue && npm ci`.
