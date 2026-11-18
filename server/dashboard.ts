@@ -3,6 +3,7 @@ import { Server } from 'socket.io';
 import { createServer } from 'http';
 import cors from 'cors';
 import basicAuth from 'express-basic-auth';
+import { rateLimit } from 'express-rate-limit';
 import type { SessionState, DashboardConfig } from '../lib/types.js';
 import { logger } from '../lib/logger.js';
 import type { BudgetTracker } from '../core/budget-tracker.js';
@@ -132,6 +133,9 @@ export function startDashboardServer(
       }
     }
   }
+
+  // Limit request rate before any credential is checked, so sign-in details cannot be guessed at speed
+  app.use(rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: 'draft-7', legacyHeaders: false }));
 
   // Apply auth middleware to all routes except health check
   if (authMiddleware) {
@@ -309,10 +313,10 @@ export function startDashboardServer(
     if (authConfig?.enabled) {
       console.log(`💡 Usage examples:`);
       if (authConfig.type === 'basic' || authConfig.type === 'both') {
-        console.log(`   curl -u ${authConfig.username}:${authConfig.password} http://localhost:${port}/api/metrics`);
+        console.log(`   curl -u <username>:<password> http://localhost:${port}/api/metrics`);
       }
       if (authConfig.type === 'token' || authConfig.type === 'both') {
-        console.log(`   curl -H "Authorization: Bearer ${authConfig.token}" http://localhost:${port}/api/metrics`);
+        console.log(`   curl -H "Authorization: Bearer <token>" http://localhost:${port}/api/metrics`);
       }
       console.log();
     }
