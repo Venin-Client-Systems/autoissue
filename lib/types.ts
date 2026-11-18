@@ -32,7 +32,7 @@ export const DEFAULT_MAX_TURNS: Record<string, number> = {
  */
 export const SpawnOptionsSchema = z.object({
   model: z.enum(['opus', 'sonnet', 'haiku'], {
-    errorMap: () => ({ message: 'Model must be one of: opus, sonnet, haiku' }),
+    error: 'Model must be one of: opus, sonnet, haiku',
   }),
   maxBudgetUsd: z.number().min(0.01, {
     message: 'Budget must be at least 0.01 USD (minimum realistic API call cost)',
@@ -182,8 +182,8 @@ export const AgentConfigSchema = z.object({
   engines: z.array(EngineNameSchema).min(1).default(['codex', 'claude']),
   /** 'auto' picks simple/medium/complex per issue (labels first, then heuristic). */
   tier: z.enum(['auto', 'simple', 'medium', 'complex']).default('auto'),
-  codexModels: CodexModelsSchema.default({}),
-  claudeModels: ClaudeModelsSchema.default({}),
+  codexModels: CodexModelsSchema.prefault({}),
+  claudeModels: ClaudeModelsSchema.prefault({}),
   /** Deprecated: use tier/claudeModels. 'opus' or 'haiku' here force complex/simple when tier is 'auto'. */
   model: z.enum(['opus', 'sonnet', 'haiku']).default('sonnet'),
   /** Per-task Claude budget cap (USD). Codex runs on the ChatGPT plan and reports no cost. */
@@ -229,9 +229,9 @@ export const DashboardConfigSchema = z.object({
  */
 export const AutoissueConfigSchema = z.object({
   project: ProjectConfigSchema,
-  executor: ExecutorConfigSchema.default({}),
+  executor: ExecutorConfigSchema.prefault({}),
   planner: PlannerConfigSchema.optional(),
-  agent: AgentConfigSchema.default({}),
+  agent: AgentConfigSchema.prefault({}),
   maxTotalBudgetUsd: z.number().min(0.01).default(50.0),
   telegram: TelegramConfigSchema.optional(),
   dashboard: DashboardConfigSchema.optional(),
