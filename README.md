@@ -538,3 +538,17 @@ MIT License - see [LICENSE](./LICENSE) for details.
 ---
 
 **Made with ⚡ by [VENIN](https://venin.space)**
+
+## VENIN development and release policy
+
+Owner decision, 14 November 2026:
+
+- **Localhost first:** run the documented local development server and exercise changed application flows before deployment; run relevant automated checks. CLI/local-service projects use their local commands and tests. Use synthetic development data.
+- **Platform:** deploy hosted applications to **AWS**, use **Neon (neon.tech) PostgreSQL for application databases**, and keep source in **GitHub / `Venin-Client-Systems`**. Static sites need no database. Existing local runtime stores are not migrated by this policy; resolve conflicting architecture through an explicit scoped decision.
+- **GitHub discipline:** use meaningful issues, focused topic branches and pull requests, reviewable commits, relevant tests/checks and clear verification evidence. Keep secrets and private data out of Git. Protect `main` from force pushes/deletion; never fabricate statuses or bypass required gates. Verify the deployed revision and retain a rollback route.
+- **Default:** lightweight settings, with **no mandatory approving review**. The authorised agent may merge a verified PR under the repository's actual rules.
+- **Paid-client delivery:** localhost checks → `staging` deployment and recorded tests → `staging` → `main` release PR → **George approves on github.com from a separate GitHub reviewer account** → **Codex merges after approval and required checks** → production verification. Require independent approval of the current revision, dismiss stale approvals, protect both branches, and repeat affected tests/review after changes. Staging is password-protected and noindex.
+
+Existing stricter acceptance, planning and release gates remain binding. Before a paid-client release, verify that GitHub protections and staging are actually configured; this documentation does not configure them or authorise deployment. Agents never use George's reviewer identity to approve their own work.
+
+Autoissue itself remains a manually triggered, cloud-AI issue-to-PR runner. Its existing PR-only/no-merge contract is unchanged; an authorised operator handles merges under the policy above.
