@@ -77,7 +77,8 @@ jobs:
 
       - name: Post PR comment with results
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        if: always()
+        # Automatic dependency pull requests run with a token that cannot comment.
+        if: always() && github.actor != 'dependabot[bot]'
         with:
           script: |
             const { data: checks } = await github.rest.checks.listForRef({
