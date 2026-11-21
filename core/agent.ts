@@ -12,6 +12,7 @@ import {
   validateSessionId,
   validateTimeout,
   validateCwd,
+  validateEffort,
 } from './agent-validation.js';
 
 const execFileAsync = promisify(execFile);
@@ -88,6 +89,8 @@ export interface SpawnOptions {
   timeoutMs?: number;
   cwd?: string;
   yolo?: boolean;
+  /** Claude Code --effort level. Omitted: no flag, so the CLI's own setting applies. */
+  effort?: string;
 }
 
 /**
@@ -253,6 +256,10 @@ export async function runClaudeOnce(
     validateCwd(opts.cwd);
   }
 
+  if (opts.effort !== undefined) {
+    validateEffort(opts.effort);
+  }
+
   const start = Date.now();
   const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS[opts.model] ?? 8;
   const args = [
@@ -262,6 +269,10 @@ export async function runClaudeOnce(
     '--max-turns', String(maxTurns),
     '--append-system-prompt', opts.systemPrompt,
   ];
+
+  if (opts.effort) {
+    args.push('--effort', opts.effort);
+  }
 
   if (opts.maxBudgetUsd > 0) {
     args.push('--max-budget-usd', opts.maxBudgetUsd.toString());

@@ -70,12 +70,15 @@ export function resetEngineState(): void {
   exhausted.clear();
 }
 
+/** The Claude model and optional effort for a tier (a bare string means no effort flag). */
+export function claudeChoice(tier: Difficulty, agent: AgentConfig): { model: string; effort?: string } {
+  const choice = agent.claudeModels[tier];
+  return typeof choice === 'string' ? { model: choice } : choice;
+}
+
 export function describeModel(engine: EngineName, tier: Difficulty, agent: AgentConfig): string {
-  if (engine === 'codex') {
-    const choice = agent.codexModels[tier];
-    return choice.effort ? `${choice.model} (${choice.effort})` : choice.model;
-  }
-  return agent.claudeModels[tier];
+  const choice = engine === 'codex' ? agent.codexModels[tier] : claudeChoice(tier, agent);
+  return choice.effort ? `${choice.model} (${choice.effort})` : choice.model;
 }
 
 /**
@@ -132,9 +135,10 @@ export async function runTaskAgent(input: EngineRunInput): Promise<EngineRunResu
 // --- Claude -----------------------------------------------------------------
 
 async function runClaude(input: EngineRunInput): Promise<EngineRunResult> {
-  const model = input.agent.claudeModels[input.tier];
+  const { model, effort } = claudeChoice(input.tier, input.agent);
   const response = await runClaudeOnce(input.prompt, {
     model,
+    effort,
     maxBudgetUsd: input.agent.maxBudgetUsd,
     systemPrompt: input.systemPrompt,
     cwd: input.cwd,
@@ -142,7 +146,7 @@ async function runClaude(input: EngineRunInput): Promise<EngineRunResult> {
     maxTurns: input.agent.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
     timeoutMs: input.timeoutMs,
   });
-  return { engine: 'claude', model, ...response };
+  return { engine: 'claude', model: describeModel('claude', input.tier, input.agent), ...response };
 }
 
 // --- Codex ------------------------------------------------------------------

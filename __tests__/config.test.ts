@@ -67,6 +67,45 @@ describe('loadConfig', () => {
     expect(config.executor.skipIssuesWithOpenPr).toBe(true);
   });
 
+  it('accepts Claude models with an effort, and full model IDs', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      project: { repo: 'owner/repo', path: '/path/to/repo' },
+      agent: {
+        engines: ['claude'],
+        claudeModels: {
+          simple: 'claude-opus-5-5',
+          medium: { model: 'opus', effort: 'high' },
+          complex: { model: 'claude-opus-5-5', effort: 'high' },
+        },
+      },
+    }));
+    const config = loadConfig('/path/to/config.json');
+    expect(config.agent.claudeModels).toEqual({
+      simple: 'claude-opus-5-5',
+      medium: { model: 'opus', effort: 'high' },
+      complex: { model: 'claude-opus-5-5', effort: 'high' },
+    });
+  });
+
+  it('rejects an effort Claude Code does not support', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      project: { repo: 'owner/repo', path: '/path/to/repo' },
+      agent: { claudeModels: { complex: { model: 'opus', effort: 'ultra' } } },
+    }));
+    expect(() => loadConfig('/path/to/config.json')).toThrow('Invalid config');
+  });
+
+  it('rejects a model that is not a Claude model', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      project: { repo: 'owner/repo', path: '/path/to/repo' },
+      agent: { claudeModels: { complex: 'gpt-6-astra' } },
+    }));
+    expect(() => loadConfig('/path/to/config.json')).toThrow('Invalid config');
+  });
+
   it('should throw on missing file', () => {
     mockExistsSync.mockReturnValue(false);
 

@@ -53,6 +53,13 @@ close the issue, with no PR or review) is still available as `executor.createPr:
 
 - These are overridable in `agent.codexModels` and `agent.claudeModels`. `agent.engines` sets the
   order (default `["codex", "claude"]`; use `["claude"]` to skip Codex).
+- A Claude tier is a bare model (`"opus"`, or a full ID such as `"claude-opus-5-5"`) or
+  `{ "model": "...", "effort": "high" }`. Effort is one of `low`, `medium`, `high`, `xhigh` or
+  `max` and is passed as `--effort`. **Without an effort no flag is passed, so the worker uses the
+  effort in the machine's Claude Code settings** (`modelSettings` in `~/.claude/settings.json`),
+  which may be higher and slower than you expect. Set it explicitly for unattended runs.
+- An alias such as `opus` resolves to the newest model of that family when the run starts. Use the
+  full ID to pin one model.
 - A usage limit marks that engine as exhausted **for the rest of the run**. Later tasks go
   straight to the next engine.
 - When **every** engine is exhausted, running tasks finish, no new tasks start, unstarted tasks stay
@@ -150,6 +157,41 @@ Read the summary at the end of the output (or `autoissue status <label>`), and r
 Do not delete autoissue branches, worktrees or session files to "clean up" unless the owner
 asks. `.worktrees/` is excluded from git status automatically, and finished worktrees are removed
 by autoissue itself.
+
+## Hypercare mode (an agent reviews every PR before it merges)
+
+Use this when the work matters enough that no Autoissue PR should merge on green CI alone, for
+example the first runs on a new product or anything that touches money, tax or security. The
+operating agent (the one that started the run) owns the result, not the worker.
+
+**Set-up**
+- `executor.maxParallel: 1`, and label **one issue per run**. Each issue then starts from a base
+  that already holds the reviewed and merged work before it. Label the next issue only after the
+  previous PR has merged.
+- Pin the worker model and effort in `agent.claudeModels` (and `agent.engines` if only Claude is
+  wanted), so every PR was written by a known model at a known effort.
+- Make `executor.verifyCommand` match CI exactly, including dependency and licence checks. If tests
+  need a service (a database, for example), start it and export its connection settings in the
+  environment that runs Autoissue: the worker and the verify command inherit it. Confirm from the
+  log that those tests ran rather than skipped.
+- Set `agent.maxBudgetUsd` high enough that a strong model at high effort is not cut off part way;
+  hitting the cap fails the task.
+
+**For each PR, the operating agent**
+1. Reads the whole diff against the issue's acceptance criteria and the repository's own rules and
+   documents, not the worker's summary.
+2. Runs the full verification locally, with the services the tests need.
+3. Looks for what CI cannot see: tests that pass without testing anything, criteria that are
+   claimed but not met, shortcuts around security or sign-in, made-up constants, unrelated changes
+   and missing error paths.
+4. Fixes what needs fixing with its own commits on the PR branch. It does not re-run Autoissue on
+   the same issue: an open PR makes Autoissue skip it, and a leftover branch blocks the push.
+5. Leaves a review comment on the PR listing what it checked and what it changed.
+6. Merges only when CI is green and the repository's rules allow it, then closes the issue if the
+   merge did not (GitHub closes issues only on merges into the default branch).
+
+A worker that makes no change or fails verification is not retried blindly: read its explanation,
+fix the issue text or the blocker, and only then label it again.
 
 ## Requirements
 

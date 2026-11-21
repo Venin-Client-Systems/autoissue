@@ -62,7 +62,7 @@ export class ModelValidationError extends AgentValidationError {
   constructor(model: string) {
     super(
       `Invalid model: ${model}`,
-      'Must be one of: opus, sonnet, haiku',
+      'Must be one of: opus, sonnet, haiku, or a full claude-* model ID',
     );
     this.name = 'ModelValidationError';
   }
