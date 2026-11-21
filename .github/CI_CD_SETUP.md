@@ -18,7 +18,6 @@ This document explains the GitHub Actions workflows and how to configure them fo
   - Run linter (if configured)
   - Type check (continues even with known pre-existing errors)
   - Run unit tests
-  - Upload coverage to Codecov (optional)
 
 - **E2E**: Runs only on `main` branch or PRs to `main`
   - Install dependencies
