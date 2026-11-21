@@ -177,6 +177,17 @@ operating agent (the one that started the run) owns the result, not the worker.
 - Set `agent.maxBudgetUsd` high enough that a strong model at high effort is not cut off part way;
   hitting the cap fails the task.
 
+**Before labelling an issue**
+- Read it as the worker will. Add explicit constraints where a short issue leaves room for a harmful
+  guess, for example "library code only, no HTTP route until the permission layer exists", or
+  where the worker cannot reach a source the issue relies on (a design tool, a private service).
+  Put what it needs in the repository first (for example exported design tokens).
+- After adding the label, wait until the issues API lists the issue under it
+  (`gh api 'repos/<owner>/<repo>/issues?labels=<label>&state=open'`). A label added a moment ago
+  can be missing from that list, and Autoissue then reports "No issues found" and exits 0.
+- If the tests need a running service, say in the repository's agent instructions that the worker
+  must use the one in its environment and not start its own on the same port.
+
 **For each PR, the operating agent**
 1. Reads the whole diff against the issue's acceptance criteria and the repository's own rules and
    documents, not the worker's summary.
@@ -192,6 +203,9 @@ operating agent (the one that started the run) owns the result, not the worker.
 
 A worker that makes no change or fails verification is not retried blindly: read its explanation,
 fix the issue text or the blocker, and only then label it again.
+
+When a review finds work that is outside the issue (a gap the worker reported, or one the reviewer
+found), open a new issue in the same format and run it next, rather than growing the PR.
 
 ## Requirements
 
