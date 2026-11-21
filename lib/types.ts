@@ -171,10 +171,28 @@ export const CodexModelsSchema = z.object({
   complex: CodexModelChoiceSchema.default({ model: 'gpt-6-astra', effort: 'high' }),
 });
 
+/** Claude Code `--effort` levels. */
+export const ClaudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/** A Claude model: an alias (opus, sonnet, haiku) or a full model ID such as "claude-opus-5-5". */
+export const ClaudeModelNameSchema = z.union([
+  z.enum(['opus', 'sonnet', 'haiku']),
+  z.string().regex(/^claude-[a-z0-9][a-z0-9.-]*$/, 'Must be opus, sonnet, haiku or a full claude-* model ID'),
+]);
+
+/**
+ * Claude model for one tier: a bare model name, or { model, effort }.
+ * Without an effort no --effort flag is passed, so the CLI's own setting applies.
+ */
+export const ClaudeModelChoiceSchema = z.union([
+  ClaudeModelNameSchema,
+  z.object({ model: ClaudeModelNameSchema, effort: ClaudeEffortSchema.optional() }),
+]);
+
 export const ClaudeModelsSchema = z.object({
-  simple: z.enum(['opus', 'sonnet', 'haiku']).default('haiku'),
-  medium: z.enum(['opus', 'sonnet', 'haiku']).default('sonnet'),
-  complex: z.enum(['opus', 'sonnet', 'haiku']).default('opus'),
+  simple: ClaudeModelChoiceSchema.default('haiku'),
+  medium: ClaudeModelChoiceSchema.default('sonnet'),
+  complex: ClaudeModelChoiceSchema.default('opus'),
 });
 
 export const AgentConfigSchema = z.object({

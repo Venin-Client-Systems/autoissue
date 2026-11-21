@@ -27,12 +27,23 @@ const MIN_SESSION_ID_LENGTH = 5;
 /**
  * Validate model name.
  *
- * @throws {ModelValidationError} If model is not 'opus', 'sonnet', or 'haiku'
+ * @throws {ModelValidationError} If model is not 'opus', 'sonnet', 'haiku' or a full claude-* model ID
  */
 export function validateModel(model: string): void {
   const validModels = ['opus', 'sonnet', 'haiku'];
-  if (!validModels.includes(model)) {
+  if (!validModels.includes(model) && !/^claude-[a-z0-9][a-z0-9.-]*$/.test(model)) {
     throw new ModelValidationError(model);
+  }
+}
+
+/**
+ * Validate a Claude Code effort level.
+ *
+ * @throws {AgentValidationError} If effort is not low, medium, high, xhigh or max
+ */
+export function validateEffort(effort: string): void {
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+    throw new AgentValidationError(`Invalid effort: ${effort}`, 'Must be one of: low, medium, high, xhigh, max');
   }
 }
 

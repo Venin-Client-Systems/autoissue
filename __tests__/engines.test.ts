@@ -210,4 +210,23 @@ describe('runTaskAgent', () => {
     const res = await runTaskAgent(input('medium', { engines: ['claude'] }));
     expect(res).toMatchObject({ engine: 'claude', model: 'sonnet' });
   });
+
+  it('passes a configured Claude model ID and effort to the CLI', async () => {
+    process.env.FAKE_CLAUDE_MODE = 'ok';
+    const res = await runTaskAgent(input('medium', {
+      engines: ['claude'],
+      claudeModels: { medium: { model: 'claude-opus-5-5', effort: 'high' } },
+    }));
+    expect(res).toMatchObject({ engine: 'claude', model: 'claude-opus-5-5 (high)' });
+    const claudeArgs = readFileSync(`${process.env.FAKE_LOG}.claude`, 'utf-8');
+    expect(claudeArgs).toContain('--model\nclaude-opus-5-5\n');
+    expect(claudeArgs).toContain('--effort\nhigh\n');
+  });
+
+  it('passes no effort flag when none is configured', async () => {
+    process.env.FAKE_CLAUDE_MODE = 'ok';
+    await runTaskAgent(input('complex', { engines: ['claude'] }));
+    const claudeArgs = readFileSync(`${process.env.FAKE_LOG}.claude`, 'utf-8');
+    expect(claudeArgs).not.toContain('--effort');
+  });
 });

@@ -200,6 +200,7 @@ Create `autoissue.config.json` in your project root:
 | `executor.maxParallel` | Max concurrent tasks | `3` |
 | `executor.timeoutMinutes` | Task timeout | `30` |
 | `agent.model` | AI model (`opus`, `sonnet`, `haiku`) | `sonnet` |
+| `agent.claudeModels` | Claude model per difficulty: a name (`opus`, or a full ID such as `claude-opus-5-5`) or `{ "model", "effort" }` with effort `low` to `max` | `haiku` / `sonnet` / `opus`, no effort flag |
 | `agent.maxBudgetUsd` | Budget per task | `5.0` |
 | `maxTotalBudgetUsd` | Total session budget | `50.0` |
 | `dashboard.enabled` | Enable web dashboard | `false` |
